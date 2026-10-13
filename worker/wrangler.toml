@@ -1,0 +1,58 @@
+# Cloudflare Worker:静态站点 + LLM 转发(单 Worker 方案)
+#
+# 一次部署同时搞定「网页」和「模型请求转发」,同源、零配置。
+#
+# 部署步骤:
+#   1. node tools/buildweb.mjs        # 生成前端到 web/dist
+#   2. node tools/buildworker.mjs     # 生成 Worker 到 worker/dist
+#   3. cd worker/dist && npx wrangler deploy
+#
+# 本地预览:
+#   node tools/buildweb.mjs && node tools/buildworker.mjs
+#   cd worker/dist && npx wrangler dev
+#
+# 为什么前端和转发合成一个 Worker:
+#   分开部署会有跨域 + 「前端得知道 Worker 地址」两个麻烦。
+#   合成一个之后同源,前端直接用 /api/llm,不需要任何配置。
+
+name = "poker-dealer"
+main = "index.js"
+compatibility_date = "2024-11-01"
+
+# ─────────────────────────────────────────────────────────────
+# 静态资源:前端构建产物
+#   这一行是**相对本配置文件**写的。本文件在 worker/,
+#   前端产物在仓库根的 web/dist/,所以是 ../web/dist。
+#   (构建脚本会按产物目录重新算一遍相对路径,不用手工维护两处。)
+#   **部署前请先跑 npm run web:build**。
+#   静态请求走 assets,不消耗 Worker 调用额度。
+#
+#   注意:如果你希望前端与 Worker 分开部署(比如前端放 Cloudflare Pages),
+#   把下面这段注释掉,并给前端配置 workerUrl 即可。
+# ─────────────────────────────────────────────────────────────
+[assets]
+directory = "../web/dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+
+[vars]
+# ─────────────────────────────────────────────────────────────
+# 允许哪些站点跨域调用转发接口(逗号分隔)。
+#   同源部署(本方案默认)时用不到,留空即可。
+#   只有把前端放到别的域名时才需要填,例如:
+#     ALLOWED_ORIGINS = "https://poker.pages.dev"
+# ─────────────────────────────────────────────────────────────
+ALLOWED_ORIGINS = ""
+
+# ─────────────────────────────────────────────────────────────
+# 额外允许转发的域名(逗号分隔),用于「自定义(OpenAI 兼容)」厂商。
+#   内置的 7 个云端厂商域名已自动允许
+#   (从 src/shared/providers.mjs 推导,加厂商会自动同步)。
+#   用自己的中转站 / 自建服务时填这里,例如:
+#     EXTRA_ALLOWED_HOSTS = "api.my-proxy.com,llm.internal.corp"
+# ─────────────────────────────────────────────────────────────
+EXTRA_ALLOWED_HOSTS = ""
+
+# 观测:开发时 wrangler tail 可以看实时日志
+[observability]
+enabled = true

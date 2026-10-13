@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <!-- 说明:
+       · connect-src 放开 file: 是为了读取本机 assets/ 下的素材;
+       · 模型请求统一走主进程代理(src/main/config.cjs),所以这里不需要放开各家 API 域名;
+       · three.js 是本机文件(vendor/three.module.js),用相对路径 import,
+         故意不用 <script type="importmap">(内联脚本会被 script-src 'self' 拦掉)。 -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' file: https: http://localhost:* http://127.0.0.1:*">
+  <title>德州荷官 · Poker Dealer</title>
+  <link rel="stylesheet" href="styles3d.css">
+</head>
+<body>
+  <div id="app"></div>
+  <script type="module" src="boot.js"></script>
+</body>
+</html>

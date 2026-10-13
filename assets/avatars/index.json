@@ -1,0 +1,50 @@
+[
+  {
+    "id": "steady",
+    "file": "steady.svg",
+    "style": "notionists",
+    "bytes": 13116
+  },
+  {
+    "id": "math",
+    "file": "math.svg",
+    "style": "notionists",
+    "bytes": 21160
+  },
+  {
+    "id": "balanced",
+    "file": "balanced.svg",
+    "style": "notionists",
+    "bytes": 12948
+  },
+  {
+    "id": "curious",
+    "file": "curious.svg",
+    "style": "notionists",
+    "bytes": 16004
+  },
+  {
+    "id": "chatty",
+    "file": "chatty.svg",
+    "style": "notionists",
+    "bytes": 11205
+  },
+  {
+    "id": "pressing",
+    "file": "pressing.svg",
+    "style": "notionists",
+    "bytes": 15529
+  },
+  {
+    "id": "nit",
+    "file": "nit.svg",
+    "style": "notionists",
+    "bytes": 10965
+  },
+  {
+    "id": "maniac",
+    "file": "maniac.svg",
+    "style": "notionists",
+    "bytes": 13810
+  }
+]

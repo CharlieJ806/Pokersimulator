@@ -1,0 +1,263 @@
+/*
+ * 移动端 / 小屏适配
+ *
+ * 只在浏览器版加载(桌面 Electron 版不引它)。解决实测发现的问题:
+ *
+ *   手机横屏 852×393 下(未适配时):
+ *     顶栏 85px(文字被挤成竖排) + 侧栏 260px(占右半屏) + 手牌一览 103px
+ *     + 操作条 → 3D 牌桌只剩 21px,基本啥也看不见。
+ *
+ * 策略(按收益排序):
+ *   1. **侧栏默认收起** —— 它占 260px 宽,而且只有看记录时才需要。
+ *      收起/展开是现成的(setup3d 的「收起」按钮),这里靠 JS 在启动时折叠一次,
+ *      CSS 只负责「收起时别占位」。
+ *   2. **顶栏压缩并允许横向滚动** —— 六个按钮总宽超过 852px,
+ *      不处理会把文字压成竖排(实测就是这个现象)。
+ *   3. **手牌一览压到最小可用高度** —— 牌面是手机上唯一能看清牌的地方,不隐藏。
+ *   4. 所有可点元素 ≥ 40px(触控下限 44px,顶栏这种密集区折中到 40)。
+ *
+ * 这里刻意**不删任何功能**:侧栏和手牌一览都有现成开关,只是默认状态变了。
+ */
+
+/* ============================================================ 全局触控行为 */
+
+/* 打牌时最烦的是误触把页面拉走 / 双指缩放 */
+html, body {
+  overscroll-behavior: none;
+  touch-action: manipulation;
+}
+
+/* 画布要能接收拖拽与点击,但不能触发页面滚动或缩放 */
+canvas#gl {
+  touch-action: none;
+}
+
+/* 手机上 :hover 会「粘住」,去掉点击高亮块 */
+@media (hover: none) {
+  * { -webkit-tap-highlight-color: transparent; }
+}
+
+/* ============================================================ 手机横屏(主目标) */
+
+/*
+ * 用 orientation + max-height 而不是单纯宽度:
+ * 手机横屏虽然「宽」,但**高度**才是瓶颈(852×393 的高度只有 393px)。
+ */
+@media (orientation: landscape) and (max-height: 500px) {
+
+  /* —— 顶栏:压到一行,内容超宽时横向滚动而不是挤成竖排 —— */
+  .topbar {
+    min-height: 44px;
+    height: 44px;
+    padding: 0 8px;
+    gap: 6px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+    flex-wrap: nowrap;
+  }
+  .topbar::-webkit-scrollbar { display: none; }
+
+  /* 顶栏里的元素一律不换行、不压缩 —— 否则文字会一个字一行 */
+  .topbar > *,
+  .topbar__left,
+  .topbar__right {
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+  .topbar__left, .topbar__right { gap: 4px; }
+  .topbar__center { flex: 0 0 auto; }
+
+  /* 窄屏时副标题类的标签先让位 */
+  .topbar__tag { font-size: 11px; padding: 2px 6px; }
+
+  /* 顶栏按钮:缩小内边距,但保底 40px 高 */
+  .topbar .btn {
+    padding: 0 8px;
+    min-height: 40px;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  /* 按钮里的 <b> 状态字(盖着/开)在手机上省掉,标题已说明含义 */
+  .topbar .btn b { display: none; }
+
+  /* —— 侧栏:做成覆盖式抽屉,不再挤压牌桌 ——
+     收起状态由 JS 在启动时设置(setup3d.setSidePanelOpen(false));
+     这里保证「展开时」是浮在牌桌上方,而不是把牌桌挤窄。 */
+  .sidepanel {
+    position: fixed;
+    top: 46px;
+    right: 6px;
+    bottom: 6px;
+    width: min(56vw, 300px);
+    max-height: none;
+    z-index: 60;
+  }
+
+  /* —— 手牌一览:压到最小可用高度 —— */
+  .handstrip {
+    left: 8px;
+    right: 8px;
+    bottom: 8px;
+    --mcw: 22px;
+    --mch: 30px;
+  }
+  .handstrip__head {
+    padding: 2px 8px;
+    min-height: 24px;
+  }
+  .handstrip__title { font-size: 11px; }
+  .handstrip__note { display: none; }          /* 说明性文案,手机上省掉 */
+  .handstrip__board {
+    padding: 2px 8px;
+    min-height: 26px;
+    gap: 6px;
+  }
+  .handstrip__boardLabel, .handstrip__street { font-size: 10.5px; }
+  .handstrip__body { padding: 3px 8px 5px; gap: 5px; }
+  .handrow { min-width: 58px; padding: 3px 5px; }
+  .handrow__stack { font-size: 10px; }
+  .hscard__pos { font-size: 9px; }
+
+  /* 名册要能横向滚动 —— 6 人桌的名牌宽度加起来会超出屏宽,
+     不滚动的话最后一家会被裁掉(实测:牌面底部被切)。 */
+  .handstrip__body {
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+    /* 高度按内容走,但给出上限防止把牌桌挤没 */
+    max-height: 96px;
+  }
+  .handstrip__body::-webkit-scrollbar { display: none; }
+
+  /* 展开态(点了「收起」的切换)才需要滚动 */
+  .handstrip.is-collapsed .handstrip__body { display: none; }
+
+  /* —— 下注 / 操作条:位置由 JS 动态对齐到手牌一览上沿 ——
+     (见 mobileLayout.js 的 syncPlayerBarAnchor。
+       桌面那个固定值在手机上会让按钮浮到顶栏上去,实测过。) */
+  .pbar__acts { gap: 8px; }
+  .pbar__acts button {
+    min-width: 84px;
+    min-height: 44px;
+    font-size: 15px;
+    padding: 0 12px;
+  }
+  .pbar__extra {
+    gap: 6px;
+  }
+  .pbar__extra button {
+    min-height: 40px;
+    font-size: 12px;
+    padding: 0 10px;
+  }
+  /* 加注输入区:手机上让它横向铺开,避免换行后盖住牌桌 */
+  .pbar__raise {
+    gap: 6px;
+    padding: 8px;
+    max-width: calc(100vw - 16px);
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  .pbar__raise input { width: 88px; min-height: 40px; }
+  .pbar__raise .pr__quick button {
+    min-width: 48px;
+    min-height: 40px;
+    font-size: 12px;
+    padding: 0 8px;
+  }
+}
+
+/* ============================================================ 窄屏(竖屏 / 小平板) */
+
+@media (max-width: 820px) {
+  /* 侧栏改成右侧覆盖抽屉 */
+  .sidepanel {
+    position: fixed;
+    top: 48px;
+    right: 6px;
+    bottom: 6px;
+    width: min(88vw, 320px);
+    max-height: none;
+    z-index: 60;
+  }
+
+  /* 顶栏允许横向滚动,避免换行 */
+  .topbar {
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+    flex-wrap: nowrap;
+  }
+  .topbar::-webkit-scrollbar { display: none; }
+  .topbar > *, .topbar__left, .topbar__right {
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+
+  .handstrip {
+    left: 8px;
+    right: 8px;
+    max-width: calc(100vw - 16px);
+  }
+
+  /* 主页模式卡片竖排 */
+  .home__modes { grid-template-columns: 1fr; }
+}
+
+/* ============================================================ 触控目标下限 */
+
+/*
+ * 实测(未适配时):手机横屏 21 个可见按钮里 13 个高度低于 44px,
+ * 最小的「收起」只有 40×23 —— 手指点不准。
+ * 这里给可点元素兜底高度,不改视觉宽度。
+ */
+@media (pointer: coarse) {
+  button,
+  .btn,
+  .modecard,
+  [role="button"] {
+    min-height: 40px;
+  }
+  /* 大按钮(开局、下注)给足 44px */
+  .pbar__acts button,
+  .modecard,
+  #btnStart,
+  #btnDeal {
+    min-height: 44px;
+  }
+  /* 手牌一览/面板的收起按钮是密集小控件,给 32px 保底 */
+  .handstrip__head .btn--tiny,
+  .sidepanel__tabs .btn,
+  .panel__collapse {
+    min-height: 32px;
+    min-width: 44px;
+  }
+}
+
+/* ============================================================ 刘海屏安全区 */
+
+@supports (padding: env(safe-area-inset-bottom)) {
+  @media (orientation: landscape) {
+    .topbar {
+      padding-left: max(8px, env(safe-area-inset-left));
+      padding-right: max(8px, env(safe-area-inset-right));
+    }
+    /* 横屏时刘海在左右两侧,底部操作区要避开 */
+    .pbar__acts,
+    .handstrip {
+      margin-left: env(safe-area-inset-left);
+      margin-right: env(safe-area-inset-right);
+    }
+  }
+}
+
+/* ============================================================ 降级:没有 WebGL */
+
+#app .no-webgl {
+  padding: 24px;
+  color: #f88;
+  font: 13px/1.7 ui-monospace, monospace;
+  white-space: pre-wrap;
+}

@@ -1,0 +1,36 @@
+# API Key 等本地机密 —— 绝不入库
+# (用户自带的 Key 只应存在于本文件 / 浏览器 localStorage)
+.local-secrets.json
+secrets.json
+.env
+.env.*
+
+# 依赖与构建产物
+node_modules/
+web/dist/
+worker/dist/
+
+# 运行时产物
+zz-*.log
+*.tmp
+
+# 截图:只保留 README「界面截图」那一节列出的顶层文件。
+# shots/web、shots/mobile 是那些已移除的检查脚本跑出来的产物,不入库。
+shots/web/
+shots/mobile/
+shots/_*.png
+
+# ---------------------------------------------------------------
+# 测试 / 审查 / 诊断脚本不入库(体积大、只对开发有用)
+#
+# 只保留「运行与发布」真正需要的那三个:
+#   buildweb.mjs     构建浏览器版到 web/dist
+#   buildworker.mjs  构建 Cloudflare Worker 到 worker/dist
+#   webserve.mjs     本地起一个静态服务器预览浏览器版
+# 其余(audit_* / *test* / *check* / 各种 sweep、diag、probe)全部忽略。
+# 想恢复某个脚本,在下面加一行 `!tools/xxx.mjs` 即可。
+# ---------------------------------------------------------------
+tools/*
+!tools/buildweb.mjs
+!tools/buildworker.mjs
+!tools/webserve.mjs

@@ -1,0 +1,21 @@
+{
+  "name": "poker-dealer-sim",
+  "productName": "德州荷官 Poker Dealer",
+  "version": "1.0.0",
+  "private": true,
+  "description": "你当荷官、AI 当牌手 —— 桌面版与浏览器版德州扑克荷官模拟器(第一视角 · 独立 AI 代理 · 思考过程可看)",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --devtools",
+
+    "web:build": "node tools/buildweb.mjs",
+    "web:serve": "node tools/webserve.mjs 5173",
+    "worker:build": "node tools/buildworker.mjs",
+    "worker:dev": "cd worker/dist && npx wrangler dev",
+    "worker:deploy": "cd worker/dist && npx wrangler deploy"
+  },
+  "devDependencies": {
+    "electron": "^33.4.11"
+  }
+}

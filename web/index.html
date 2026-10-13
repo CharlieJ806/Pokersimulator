@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+
+  <!-- 关键:浏览器版必须有 viewport meta。
+       没有它,手机浏览器会按 980px 的虚拟视口渲染再整体缩小,
+       结果是所有按钮都小到点不准(实测 21 个按钮里 13 个高度低于 44px 的触控下限)。 -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#141b22">
+  <meta name="color-scheme" content="dark">
+  <!-- 允许「添加到主屏幕」后以独立窗口打开,更像 App -->
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+
+  <title>德州荷官 · Poker Dealer</title>
+
+  <!--
+    浏览器版的 CSP:
+      · connect-src 需要放开 https:(Worker 与各家 LLM API),以及本地模型用的
+        http://127.0.0.1:* / http://localhost:*;
+      · style-src 的 'unsafe-inline' 是因为 3D 标签的定位样式是运行时拼的;
+      · 不用 importmap(内联脚本会被 script-src 'self' 拦掉),three.js 走相对路径。
+  -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' https: http://localhost:* http://127.0.0.1:*">
+
+  <!-- 说明:这里写的是**构建产物里的**相对路径。
+       产物结构(tools/buildweb.mjs 生成):
+         web/dist/index.html      ← 入口就在根
+         web/dist/main.js  pokerApi.js  mobile.css
+         web/dist/src/**  web/dist/vendor/**
+       src/ 与 vendor/ 必须和入口同级,因为 3D 模块里写的是
+       `../../vendor/three.module.js`(从 src/ui3d/ 往上两级)——
+       这也是为什么构建脚本只做复制、不改路径。
+       构建脚本会校验这些路径是否真的存在。 -->
+  <link rel="stylesheet" href="src/ui/styles3d.css">
+  <link rel="stylesheet" href="mobile.css">
+</head>
+<body>
+  <div id="app"></div>
+
+  <!-- 启动逻辑放在外部文件里,不用内联脚本 ——
+       CSP 是 script-src 'self',内联会被拦掉(控制台报 Refused to execute inline script)。 -->
+  <script type="module" src="main.js"></script>
+
+  <noscript>
+    <p style="color:#f88;padding:24px;font:14px/1.6 system-ui">
+      这个页面需要启用 JavaScript 才能运行(3D 牌桌基于 WebGL)。
+    </p>
+  </noscript>
+</body>
+</html>
