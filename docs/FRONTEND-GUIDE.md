@@ -138,14 +138,9 @@
    - 改这些块的高度后不用手调偏移,JS 每帧会重新量。
    - 但**改 CSS 里的 margin 会影响它们之间的堆叠关系**,改完看一眼截图。
 5. **手机上不是简单的等比缩小** —— 有一套独立的 `web/mobile.css`,
-   改完建议跑 `npm run mobile:check` 看占屏比。
-6. **改完跑一下测试**:
-   ```bash
-   npm run test:engine     # 规则没被改坏
-   npm run test:ui         # 界面端到端(需要 Electron)
-   npm run anim:test       # 发牌动画
-   npm run chips:test      # 结算动画
-   ```
+   改完用真机或开发者工具的手机模拟看一下横屏占屏比。
+6. **改完自己跑一遍**:`npm start` 打两手,确认改动没弄坏别的地方。
+   (仓库里只保留了运行与发布用的脚本,开发期的测试脚本没有随仓库分发。)
 
 ---
 

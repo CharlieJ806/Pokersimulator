@@ -39,7 +39,7 @@ export function createSetup(root, { onStart, onSaveAI, onExitHome, mode = 'lobby
     <div class="setup__card">
       <div class="setup__head">
         <div>
-          <h1>德州荷官 <span class="setup__ver">Poker Dealer</span></h1>
+          <h1>德州扑克模拟器 <span class="setup__ver">Poker Simulator</span></h1>
           <p class="setup__sub" id="setupSub"></p>
         </div>
         ${mode === 'drawer' ? '<button class="btn btn--ghost" id="setupClose">✕ 关闭</button>' : ''}
@@ -216,6 +216,9 @@ export function createSetup(root, { onStart, onSaveAI, onExitHome, mode = 'lobby
   let providers = [];
   let currentKeys = {};
   let cfg = null;
+  // 当前是不是玩家模式 —— 底部汇总与副标题都要跟着变(玩家模式下
+  // 写「+ 你(荷官)」「你是荷官」都是自相矛盾的,实测被用户指出来过)
+  let isPlayerMode = false;
 
   function fill(values) {
     cfg = values;
@@ -266,8 +269,11 @@ export function createSetup(root, { onStart, onSaveAI, onExitHome, mode = 'lobby
     const memText = (memOn && memEvery > 0)
       ? `AI 每 ${memEvery} 手记住你的打法`
       : 'AI 不记忆(每手从零开始)';
+    // 「你」在两种模式里的身份不同,底部这行汇总也得跟着变 ——
+    // 玩家模式下写「+ 你(荷官)」是自相矛盾的。
+    const meText = isPlayerMode ? '+ 你(上桌打)' : '+ 你(荷官)';
     q('footInfo').textContent =
-      `${q('seats').value} 位 AI 牌手 + 你(荷官)· 起始 ${stack} 筹码 = ${(stack / bb).toFixed(0)} 个大盲 · `
+      `${q('seats').value} 位 AI 牌手 ${meText} · 起始 ${stack} 筹码 = ${(stack / bb).toFixed(0)} 个大盲 · `
       + `盲注 ${sb}/${bb}${extras.length ? ' · ' + extras.join(' · ') : ''} · ${mode} · ${memText}`;
   }
 
@@ -361,6 +367,7 @@ export function createSetup(root, { onStart, onSaveAI, onExitHome, mode = 'lobby
 
   /** 玩家模式下藏掉「显示思考气泡」(看不到别家的思考,这个开关没意义) */
   function setPlayerMode(on) {
+    isPlayerMode = !!on;
     const row = q('thinkToggleRow');
     if (row) row.hidden = !!on;
     // 标题说明随模式变:玩家模式下不该出现「你是荷官」这种说法

@@ -24,7 +24,7 @@ function createWindow() {
     minWidth: 1120,
     minHeight: 720,
     backgroundColor: '#141b22',
-    title: '德州荷官 · Poker Dealer',
+    title: '德州扑克模拟器 · Poker Simulator',
     autoHideMenuBar: true,
     show: false,
     webPreferences: {

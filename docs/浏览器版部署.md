@@ -179,22 +179,18 @@ OLLAMA_ORIGINS=* ollama serve
 | `tools/buildweb.mjs` | 构建前端(复制 + 校验路径) |
 | `tools/buildworker.mjs` | 构建 Worker(复制共享模块 + 校验) |
 | `tools/webserve.mjs` | 本地静态服务器(仅开发用) |
-| `tools/webcheck.mjs` | 浏览器版端到端测试 |
-| `tools/webmobile.mjs` | 手机横屏体检 |
-| `tools/proxytest.mjs` | 转发链路测试(不用真实 Key) |
 
 ---
 
-## 八、测试
+## 八、验证
 
 ```bash
 npm run web:build && npm run worker:build
-npm run proxy:test        # 转发链路 50 项(含流式、白名单、头过滤),不需要 Key
-
-npm run web:serve         # 另开一个终端
-npm run web:check         # 浏览器版端到端(28 项):启动、WebGL、开局、AI 出牌
-npm run mobile:check      # 手机横屏占屏比与触控目标
+npm run web:serve         # 另开一个终端,浏览器打开 http://127.0.0.1:5173
 ```
 
-`proxy:test` 会起一个**模拟厂商**(本地 SSE 服务),所以不需要真实 API Key
-就能验证整条转发链路 —— 包括「流式是否真的逐块到达」。
+在页面上走一遍:选模式 → 填 Key → 开局 → 看 AI 是否正常出牌与显示思考。
+部署之后把地址发到手机上,确认横屏能正常操作。
+
+> 如果模型这条链路有问题,先看浏览器的 Network 面板里 `/api/llm` 的返回 ——
+> 最常见的两种是 **Key 没填**(401)和 **Worker 没配 ALLOWED_ORIGINS**(403)。

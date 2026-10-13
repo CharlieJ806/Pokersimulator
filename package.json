@@ -1,9 +1,9 @@
 {
   "name": "poker-dealer-sim",
-  "productName": "德州荷官 Poker Dealer",
+  "productName": "德州扑克模拟器 Poker Simulator",
   "version": "1.0.0",
   "private": true,
-  "description": "你当荷官、AI 当牌手 —— 桌面版与浏览器版德州扑克荷官模拟器(第一视角 · 独立 AI 代理 · 思考过程可看)",
+  "description": "每个座位都是一个独立大语言模型的德州扑克:你当荷官看 AI 打,或者自己上桌打。第一视角 · 独立 AI 代理 · 思考过程可看 · 手机可玩",
   "main": "main.js",
   "scripts": {
     "start": "electron .",

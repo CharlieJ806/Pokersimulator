@@ -38,7 +38,7 @@ export function createHome(root, { onPick } = {}) {
       <div class="home__brand">
         <div class="home__logo">♠</div>
         <div>
-          <h1>扑克模拟器 <span class="setup__ver">POKER DEALER</span></h1>
+          <h1>扑克模拟器 <span class="setup__ver">POKER SIMULATOR</span></h1>
         </div>
       </div>
 

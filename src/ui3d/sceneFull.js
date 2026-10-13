@@ -70,7 +70,7 @@ export class SceneTable {
 
         <header class="topbar">
           <div class="topbar__left">
-            <span class="brand">德州荷官</span>
+            <span class="brand">德州扑克模拟器</span>
             <span class="topbar__tag" id="handTag">第 0 手</span>
             <span class="topbar__tag" id="blindTag">盲注 10 / 20</span>
             <span class="topbar__tag" id="deckTag">52 张</span>
