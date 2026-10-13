@@ -29,6 +29,10 @@ Worker 的地址(多一个要填的配置)。合成之后同源、零配置、�
 
 ## 二、部署(3 步)
 
+> 📖 **想看照做就行的完整步骤(含绑定自己的域名、排错、自动部署)**,
+> 见 **[DEPLOY-WORKER.md](DEPLOY-WORKER.md)**。
+> 下面是最短的路径。
+
 ```bash
 # 1. 构建前端 → web/dist
 npm run web:build

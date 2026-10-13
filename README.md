@@ -110,6 +110,7 @@ vendor/three.module.js   three.js r169(MIT,单文件,离线)
 
 | 文件 | 内容 |
 | --- | --- |
-| [docs/DEPLOY-WEB.md](docs/DEPLOY-WEB.md) | 浏览器版与 Cloudflare 部署、配置 |
+| [docs/DEPLOY-WORKER.md](docs/DEPLOY-WORKER.md) | **完整的 Worker 部署指南**:从零到绑定自己的域名(含排错) |
+| [docs/DEPLOY-WEB.md](docs/DEPLOY-WEB.md) | 浏览器版架构原理、配置项、移动端适配、常见问题 |
 | [docs/FRONTEND-GUIDE.md](docs/FRONTEND-GUIDE.md) | 想改界面上的什么 → 去哪个文件、找哪个函数 |
-| [docs/GAME-LOGIC-AUDIT.md](docs/GAME-LOGIC-AUDIT.md) | 游戏逻辑审查报告 |
+| [docs/GAME-LOGIC-AUDIT.md](docs/GAME-LOGIC-AUDIT.md) | 游戏逻辑审查报告(历史快照,问题均已修复) |

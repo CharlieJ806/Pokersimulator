@@ -20,6 +20,27 @@ main = "index.js"
 compatibility_date = "2024-11-01"
 
 # ─────────────────────────────────────────────────────────────
+# 自定义域名(可选)
+#
+# ⚠️ 这几行**默认注释掉**是有意的:
+#    `custom_domain = true` 要求该域名已经在**同一个 Cloudflare 账号**下、
+#    NS 已生效、且没有冲突的 DNS 记录。前提没满足时,取消注释会让
+#    `wrangler deploy` 直接报错失败 —— 连 workers.dev 都上不去。
+#
+#    所以推荐顺序:
+#      1. 先直接部署一次,拿到 https://poker-dealer.<子域>.workers.dev 并验证能用;
+#      2. 在控制台 Workers → Settings → Domains & Routes → Add Custom Domain
+#         手点一下绑域名(最直观、出错信息也清楚);
+#      3. 确认域名 Active 之后,如果你想让配置进版本库,再把下面取消注释。
+#
+#    完整步骤见 docs/DEPLOY-WORKER.md。
+# ─────────────────────────────────────────────────────────────
+# routes = [
+#   { pattern = "pokedriver.me", custom_domain = true },
+#   { pattern = "www.pokedriver.me", custom_domain = true },
+# ]
+
+# ─────────────────────────────────────────────────────────────
 # 静态资源:前端构建产物
 #   这一行是**相对本配置文件**写的。本文件在 worker/,
 #   前端产物在仓库根的 web/dist/,所以是 ../web/dist。
