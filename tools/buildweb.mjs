@@ -171,6 +171,21 @@ if (fs.existsSync(PORTRAIT_SRC)) {
   warn('assets/portraits 不存在 —— 立绘会全部退化成通用占位。先跑 node tools/fetchportraits.mjs');
 }
 
+/* 3c. assets/decor —— 房间装饰(后墙挂画)
+ * scene.js 用 ../../assets/decor/painting.jpg 加载,路径规则同立绘。
+ * 只复制 decor/,不复制 assets/Background/ 里的原图(3MB PNG,游戏不用它)。 */
+log('\n[3c] assets/decor(房间装饰)');
+const DECOR_SRC = path.join(ROOT, 'assets', 'decor');
+if (fs.existsSync(DECOR_SRC)) {
+  const n = copyDir(DECOR_SRC, path.join(OUT, 'assets', 'decor'));
+  log(`  + assets/decor 共 ${n} 个文件`);
+  if (!fs.existsSync(path.join(OUT, 'assets', 'decor', 'painting.jpg'))) {
+    warn('assets/decor/painting.jpg 缺失 —— 后墙挂画会是空白画框');
+  }
+} else {
+  warn('assets/decor 不存在 —— 后墙挂画会是空白画框');
+}
+
 /* ------------------------------------------------------------ 校验 */
 
 log('\n[4] 校验');

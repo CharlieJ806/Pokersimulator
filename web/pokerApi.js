@@ -40,10 +40,22 @@ const DEFAULT_CONFIG = {
   // 推理型模型(deepseek-flash 等)先输出 reasoning_content 再给正式回答,
   // 两者共用同一个 max_tokens。实测 max_tokens=300 时推理就把额度吃光、
   // 正式回答被挤掉(finish_reason=length),决策只能从残缺文本硬猜。默认给足。
-  maxTokens: 1200,
+  // 与桌面版 src/main/config.cjs 保持一致:2000。
+  maxTokens: 2000,
+  // 推理档位:与桌面版同一套(字段映射见 src/shared/llmStream.mjs 的 REASONING_LEVELS)。
+  // 'low' = 保留推理但压到各家最低档,'off' = 完全关闭,'default' = 走厂商默认。
+  // ⚠️ 两边的默认值必须一样,否则「网页版好好的、桌面版超时」这类差异没人查得出来。
+  reasoningLevel: 'low',
   timeoutMs: 45000,
   // Worker 转发地址:部署后填自己的,或走同源 /api/llm
   workerUrl: '',
+  // 自定义中转站(与 config.cjs 的默认值保持一致)。
+  // protocol 逐 Key 配置 —— 中转站的令牌分组不同,协议就不同,
+  // 可选 openai / anthropic / responses / **gemini**(Google 原生格式),
+  // 见 shared/llmStream.mjs 的 RELAY_PROTOCOLS。
+  customEndpoint: '',
+  customKeys: [],
+  seatCustomKeys: {},
   game: {
     seats: 6,
     shortDeck: false,
@@ -102,7 +114,9 @@ function writeConfig(cfg) {
 
 function hasAnyKey(cfg) {
   if (cfg.apiKey && cfg.apiKey.trim()) return true;
-  return Object.values(cfg.keys || {}).some((k) => k && String(k).trim());
+  if (Object.values(cfg.keys || {}).some((k) => k && String(k).trim())) return true;
+  // 自定义中转站的 Key 存在 customKeys 里,不在 keys 里
+  return !!cfg.customEndpoint && (cfg.customKeys || []).some((k) => k?.key && String(k.key).trim());
 }
 
 /* ------------------------------------------------------------ Worker 转发 */
@@ -142,6 +156,12 @@ async function llmChat(spec, hooks = {}) {
   let chunkCount = 0;
   let full = '';
   let reasoning = '';
+  // 流里报出来的错误(共享解析器在 finish 事件上带出来的 error 字段)。
+  // ⚠️ 以前这里**直接忽略**了 finish 通道,于是「HTTP 200 + 流里 response.failed」
+  //    被当成一次成功、text 为空 —— 调用方只能看到「模型没给出可识别动作」这种
+  //    误导性的结论,真正的死因(上游渠道不可用 / 额度不足)一个字都没露出来。
+  //    桌面版 config.cjs 里是同一处改动,两边必须一起改(否则又变成「一条路径一个样」)。
+  let streamError = '';
   // 推理阶段 → 正式回答的切换只通知一次
   let answerStarted = false;
 
@@ -177,6 +197,7 @@ async function llmChat(spec, hooks = {}) {
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
       buffer = consumeSseBuffer(buffer, built.kind, (c) => {
+        if (c.error) { streamError = String(c.error); return; }
         if (c.phase === 'reasoning') {
           reasoning += c.reasoning;
           // 推理增量也要推给界面 —— 否则整个思考阶段是空白的
@@ -195,6 +216,8 @@ async function llmChat(spec, hooks = {}) {
         }
       });
     }
+    // 流里报错要当失败(原文带上),不能返回一个「成功的空文本」
+    if (streamError) return { ok: false, status: 200, error: `上游流里报错:${streamError}`, chunks: chunkCount };
     return { ok: true, status: 200, text: full || reasoning, reasoning, chunks: chunkCount };
   } catch (err) {
     const aborted = err?.name === 'AbortError';

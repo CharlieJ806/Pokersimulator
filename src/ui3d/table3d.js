@@ -125,12 +125,12 @@ function feltTexture() {
   const cv = document.createElement('canvas');
   cv.width = S; cv.height = S;
   const g = cv.getContext('2d');
-  // 亮绿毡布:中心偏亮、边缘压深(参考图那种干净明亮的绿)
+  // 灰调鼠尾草绿毡布:中心略亮、边缘压深。比原来的荧光绿收敛,跟浅色房间更搭
   const grd = g.createRadialGradient(S / 2, S / 2, S * 0.04, S / 2, S / 2, S * 0.56);
-  grd.addColorStop(0, '#4fd08a');
-  grd.addColorStop(0.45, '#36b673');
-  grd.addColorStop(0.8, '#1f9459');
-  grd.addColorStop(1, '#137045');
+  grd.addColorStop(0, '#6aa587');
+  grd.addColorStop(0.45, '#5a9479');
+  grd.addColorStop(0.8, '#487f65');
+  grd.addColorStop(1, '#3a6c55');
   g.fillStyle = grd;
   g.fillRect(0, 0, S, S);
 
@@ -158,7 +158,7 @@ function woodTexture() {
   const cv = document.createElement('canvas');
   cv.width = S; cv.height = S;
   const g = cv.getContext('2d');
-  g.fillStyle = '#6d4526';
+  g.fillStyle = '#b48a5e';            // 浅橡木
   g.fillRect(0, 0, S, S);
   for (let i = 0; i < 160; i++) {
     g.strokeStyle = `rgba(0,0,0,${0.03 + Math.random() * 0.07})`;
@@ -208,42 +208,74 @@ function drawMarkerTag(tex, label) {
 }
 
 /* ------------------------------------------------------------ 桌面 */
-function makeTable() {
+
+/**
+ * 桌面跟着座位圈走 —— 座位离包边的距离固定,不随人数变。
+ *
+ * ⚠️ 以前桌子是固定大小的圆桌(宽屏最多横向拉 1.35 倍),座位圈却随人数外扩成长椭圆:
+ *    9 人桌两侧的人离包边 2 个多单位,他们的底牌 / 下注筹码(按座位位置的比例摆)
+ *    直接落在地毯上(用户反馈「人多时牌不在桌上、两侧的人离桌子过远」)。
+ *    现在反过来:先定座位椭圆,再把桌子做成「座位椭圆往里收一圈」的椭圆长桌。
+ */
+const SEAT_GAP_X = 1.25;      // 座位中心 → 包边外沿的距离(两侧)
+const SEAT_GAP_Z = 1.15;      // 同上(对面那排);6 人桌时正好等于旧圆桌的间距
+const RAIL_IN = 0.65;         // 包边外沿 → 毡布边缘(包边 + 木框的厚度)
+const MIN_RAIL_X = 2.4;       // 竖屏座位收得很紧时桌子也不能比这再窄 —— 5 张公共牌要放得下
+
+/** 一条水平的椭圆闭合曲线,给包边 / 金线做 TubeGeometry 用 */
+class FlatEllipse extends THREE.Curve {
+  constructor(a, b) { super(); this.a = a; this.b = b; }
+  getPoint(t, target = new THREE.Vector3()) {
+    const th = t * Math.PI * 2;
+    return target.set(this.a * Math.cos(th), 0, this.b * Math.sin(th));
+  }
+}
+
+/**
+ * @param {number} ra 包边外沿的 x 半轴
+ * @param {number} rb 包边外沿的 z 半轴
+ * 圆柱类(桌腿 / 桌体 / 毡布)用单位圆柱 + 非等比缩放;包边是管子,
+ * 不能缩放(会两侧变粗),所以沿椭圆曲线真的建一根等粗的管子。
+ */
+function makeTable(ra = RAIL_OUTER_R, rb = RAIL_OUTER_R) {
   const g = new THREE.Group();
 
-  // 桌腿柱
+  // 桌腿柱:跟着桌子拉长一点,长桌配一根圆腿会显得头重脚轻
   const pedestal = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.75, 1.05, 1.3, 24),
-    new THREE.MeshStandardMaterial({ color: 0x2a1c12, roughness: 0.9 }),
+    new THREE.CylinderGeometry(0.75, 1.05, 1.3, 32),
+    new THREE.MeshStandardMaterial({ color: 0x8f6e4e, roughness: 0.8 }),
   );
+  pedestal.scale.set(Math.min(2.2, ra / rb), 1, 1);
   pedestal.position.y = -0.72;
   pedestal.castShadow = true;
   g.add(pedestal);
 
   // 木制桌体
   const woodMat = new THREE.MeshStandardMaterial({ map: woodTexture(), roughness: 0.72 });
-  const body = new THREE.Mesh(new THREE.CylinderGeometry(TABLE_R + 0.3, TABLE_R + 0.34, 0.26, 48), woodMat);
+  const body = new THREE.Mesh(new THREE.CylinderGeometry(1, 1.015, 0.26, 96), woodMat);
+  body.scale.set(ra - 0.31, 1, rb - 0.31);
   body.position.y = -0.16;
   body.castShadow = true;
   body.receiveShadow = true;
   g.add(body);
 
-  // 绿色毡布
+  // 毡布
   const felt = new THREE.Mesh(
-    new THREE.CylinderGeometry(TABLE_R, TABLE_R, 0.06, 64),
+    new THREE.CylinderGeometry(1, 1, 0.06, 96),
     new THREE.MeshStandardMaterial({ map: feltTexture(), roughness: 0.98 }),
   );
+  felt.scale.set(ra - RAIL_IN, 1, rb - RAIL_IN);
   felt.position.y = -0.01;
   felt.receiveShadow = true;
   g.add(felt);
 
-  // 深色包边(一圈圆环)。做得厚一点:一是像真牌桌的扶手,二是能把对面
+  // 包边(奶油色皮质)。做得厚一点:一是像真牌桌的扶手,二是能把对面
   // 人物躯干的下缘挡住,让身体看起来是「从桌子后面长出来」而不是浮在空中。
+  const path = new FlatEllipse(ra - 0.45, rb - 0.45);
   const rail = new THREE.Mesh(
-    new THREE.TorusGeometry(TABLE_R + 0.2, 0.26, 14, 64),
-    new THREE.MeshStandardMaterial({ color: PALETTE.rail, roughness: 0.6 }),
+    new THREE.TubeGeometry(path, 192, 0.26, 14, true),
+    new THREE.MeshStandardMaterial({ color: PALETTE.rail, roughness: 0.68 }),
   );
-  rail.rotation.x = Math.PI / 2;
   rail.position.y = 0.06;
   rail.castShadow = true;
   rail.receiveShadow = true;
@@ -251,10 +283,9 @@ function makeTable() {
 
   // 包边上的一点金色描边
   const trim = new THREE.Mesh(
-    new THREE.TorusGeometry(TABLE_R + 0.2, 0.024, 8, 64),
-    new THREE.MeshStandardMaterial({ color: 0xc99b34, roughness: 0.35, metalness: 0.7 }),
+    new THREE.TubeGeometry(path, 192, 0.024, 8, true),
+    new THREE.MeshStandardMaterial({ color: PALETTE.gold, roughness: 0.32, metalness: 0.75 }),
   );
-  trim.rotation.x = Math.PI / 2;
   trim.position.y = 0.3;
   g.add(trim);
 
@@ -274,12 +305,11 @@ export class Table3D {
     this.root = new THREE.Group();
     scene.add(this.root);
 
-    this.table = makeTable();
-    this.root.add(this.table);
     // 宽屏拉长(见 stretchFor 的注释)。先按当前视口算一次,
-    // 之后 resize 时由 layoutTable() 更新。
-    this.stretchX = stretchFor(1.6);
+    // 之后 resize 时由 layoutTable() 更新;桌子本身按人数建(见 _rebuildTable)。
+    this.table = null;
     this.layoutTable(1.6);
+    this._rebuildTable(6);
 
     this.seats = new Map();       // seat -> {char, holeCards, betChips, stackChips, anchor}
     this.holeGroups = new Map();
@@ -367,9 +397,61 @@ export class Table3D {
     const next = stretchFor(aspect);
     const changed = Math.abs(next - (this.stretchX || 1)) > 0.001;
     this.stretchX = next;
-    // 桌面整体沿 X 拉长 → 圆桌变椭圆长桌
-    this.table.scale.set(next, 1, 1);
+    this.aspect = Number.isFinite(aspect) && aspect > 0 ? aspect : 1.6;
+    // 桌子本身在 buildSeats 里按「人数 + 视口」重建(调用方改完视口紧接着就会 buildSeats)
     return changed;
+  }
+
+  /**
+   * 座位椭圆的**实际**半轴(含窄屏收拢)。
+   *
+   * 窄屏收拢以前按**像素宽度**判断(< 1440px 就收),结果手机横屏(852px 宽、
+   * 宽高比 2.17,其实很宽)也被收了 45%,两侧的人全挤进桌子范围。
+   * 相机取景是按宽高比算的,所以这里也只看宽高比:只有竖屏 / 方屏才收。
+   */
+  seatAxesEff(count) {
+    const axes = seatAxes(count, this.stretchX || 1);
+    const narrow = Math.max(0, Math.min(1, (1.3 - (this.aspect || 1.6)) / 0.6));
+    return { a: axes.a * (1 - narrow * 0.35), b: axes.b };
+  }
+
+  /** 桌子(包边外沿)的椭圆半轴 = 座位椭圆往里收一圈 */
+  tableAxes(count) {
+    const { a, b } = this.seatAxesEff(count);
+    return {
+      ra: Math.max(MIN_RAIL_X, a - SEAT_GAP_X),
+      rb: Math.max(RAIL_OUTER_R, b - SEAT_GAP_Z),
+    };
+  }
+
+  /** 按人数重建桌面几何(座位圈变了,桌子跟着变) */
+  _rebuildTable(count) {
+    const { ra, rb } = this.tableAxes(count);
+    const key = `${ra.toFixed(3)}:${rb.toFixed(3)}`;
+    if (this._tableKey === key) return;
+    this._tableKey = key;
+    if (this.table) {
+      this.root.remove(this.table);
+      this.table.traverse((o) => { o.geometry?.dispose?.(); });
+    }
+    this.table = makeTable(ra, rb);
+    this.root.add(this.table);
+    this.tableRA = ra;
+    this.tableRB = rb;
+  }
+
+  /**
+   * 毡布上、正对某个座位、离毡布边缘 inset 的那一点。
+   * 底牌 / 下注筹码 / 筹码堆 / 庄家按钮都用它定位 —— 以前按「座位位置 × 比例」摆,
+   * 座位一外扩,这些东西就跟着跑到桌子外面去了。
+   */
+  feltPoint(angle, inset) {
+    const fa = (this.tableRA || RAIL_OUTER_R) - RAIL_IN;
+    const fb = (this.tableRB || RAIL_OUTER_R) - RAIL_IN;
+    const ex = Math.cos(angle) * fa, ez = Math.sin(angle) * fb;
+    const len = Math.hypot(ex, ez) || 1;
+    const k = Math.max(0, len - inset) / len;
+    return { x: ex * k, z: ez * k };
   }
 
   /**
@@ -383,9 +465,9 @@ export class Table3D {
    *    第一版只留 1.15,结果最外侧两个人的手臂被画面边缘切掉。
    */
   outerHalfWidth() {
-    const n = Math.max(2, this.plates?.size || 6);
-    const k = spreadFor(n);
-    const x = SEAT_RX * k * (this.stretchX || 1);
+    // (以前读 this.plates —— Table3D 上根本没有这个字段,人数永远按 6 算)
+    const n = Math.max(2, this.seats?.size || 6);
+    const x = this.seatAxesEff(n).a;
     return x + 1.55;      // 半宽 0.95 + 两侧呼吸余量
   }
 
@@ -402,23 +484,16 @@ export class Table3D {
     const a0 = Math.PI + ARC;
     const a1 = Math.PI * 2 - ARC;
     const k = spreadFor(count);
-    // 按**弧长**等分,而不是按角度等分(见 seatAngleByArc 的注释)
-    const axes = seatAxes(count, this.stretchX || 1);
+    // 按**弧长**等分,而不是按角度等分(见 seatAngleByArc 的注释)。
+    // 半轴含窄屏收拢、宽屏拉长(见 seatAxesEff),桌子也按同一组半轴建,两者对得上。
+    const axes = this.seatAxesEff(count);
     const angle = seatAngleByArc(seat, count, axes.a, axes.b, a0, a1);
-
-    // 画面很窄时把座位往中间收一点,否则最外侧的人会被裁出画面
-    const vw = (typeof window !== 'undefined' && window.innerWidth) || 1440;
-    const narrow = Math.max(0, Math.min(1, (1440 - vw) / 300));   // 1440 宽时 0,1140 宽及以下时 1
-    const squeeze = 1 - narrow * 0.45;
-    // 宽屏则反向拉长(长桌)。两者不会同时显著生效:窄屏 aspect 小 → stretchX≈1。
-    const stretch = this.stretchX || 1;
+    void k;
 
     return {
       angle,
-      x: Math.cos(angle) * SEAT_RX * k * squeeze * stretch,
-      z: Math.sin(angle) * SEAT_RZ * k,
-      innerX: Math.cos(angle) * (TABLE_R + 0.5) * stretch,
-      innerZ: Math.sin(angle) * (TABLE_R + 0.5),
+      x: Math.cos(angle) * axes.a,
+      z: Math.sin(angle) * axes.b,
     };
   }
 
@@ -433,6 +508,9 @@ export class Table3D {
     }
     this.seats.clear();
 
+    // 桌子跟着座位圈重建(人数 / 视口变了,桌子形状也要变)
+    this._rebuildTable(count);
+
     // 中央区域:公共牌 / 烧牌堆 / 底池 / 牌堆 全部清掉重建
     for (const g of [this.boardGroup, this.burnGroup, this.potGroup, this.deckPile]) {
       if (g) this.root.remove(g);
@@ -443,7 +521,9 @@ export class Table3D {
     this.boardCards = [];
 
     this.burnGroup = new THREE.Group();
-    this.burnGroup.position.set(-2.15, 0.035, -0.95);
+    // 竖屏时桌子会变窄:烧牌堆 / 底池的横向位置要跟着毡布宽度收,别落到桌外
+    const feltA = (this.tableRA || RAIL_OUTER_R) - RAIL_IN;
+    this.burnGroup.position.set(-Math.min(2.15, feltA * 0.78), 0.035, -0.95);
     this.root.add(this.burnGroup);
     this.burnCards = [];
 
@@ -452,7 +532,7 @@ export class Table3D {
     // 原来是 (1.85, -1.0) —— 离桌面半径 2.62 的边缘太近,几乎贴着一个座位,
     // 结算时筹码从底池飞出去会「刚起飞就到了」。往里收到 1.55 左右,
     // 既有飞行距离,也不会和公共牌/下注区挤在一起。
-    this.potGroup.position.set(1.15, 0.05, -1.05);
+    this.potGroup.position.set(Math.min(1.15, feltA * 0.62), 0.05, -1.05);
     this.root.add(this.potGroup);
 
     this.deckPile = null;
@@ -508,13 +588,12 @@ export class Table3D {
       char.scale.setScalar(CHAR_SCALE * (count >= 9 ? 0.94 : count >= 8 ? 0.97 : 1));
       rig.add(char);
 
-      // 底牌:两张盖着的牌,平放在角色前面一点的桌面上
-      // 位置:离圆心 0.60R 那边收着放,保证整叠牌都在包边以内(不悬空)
-      const radial = 0.60;
+      // 底牌:两张盖着的牌,平放在这个座位正前方、毡布边缘往里一点
       const cx = Math.cos(t.angle), cz = Math.sin(t.angle);
       const tx = -cz, tz = cx;                     // 切线方向
       const holes = new THREE.Group();
-      holes.position.set(t.x * radial, 0.04, t.z * radial);
+      const hp = this.feltPoint(t.angle, 0.5);
+      holes.position.set(hp.x, 0.04, hp.z);
       holes.rotation.y = rig.rotation.y;
       const c1 = createCardMesh(null, 'sm');
       const c2 = createCardMesh(null, 'sm');
@@ -563,12 +642,15 @@ export class Table3D {
 
       // 下注筹码(在角色与底池之间)
       const bet = new THREE.Group();
-      bet.position.set(t.x * 0.38 - t.x, 0.05, t.z * 0.38 - t.z);
+      const bp = this.feltPoint(t.angle, 1.15);
+      bet.position.set(bp.x - t.x, 0.05, bp.z - t.z);
       this.root.add(bet);
 
       // 自己的筹码堆:放在自己面前的桌沿上(和底牌错开,不叠在一起)
       const stack = new THREE.Group();
-      stack.position.set(t.x * 0.66 + tx * 0.66, 0.05, t.z * 0.66 + tz * 0.66);
+      // 沿桌沿错开一点(而不是沿切线平移 —— 最外侧的座位沿切线一推就推到包边上了)
+      const sp = this.feltPoint(t.angle + 0.16, 0.42);
+      stack.position.set(sp.x, 0.05, sp.z);
       this.root.add(stack);
 
       this.seats.set(seat, {
@@ -728,7 +810,8 @@ export class Table3D {
     if (view.button >= 0 && this.seats.has(view.button)) {
       const t = this.seats.get(view.button).transform;
       this.buttonMesh.visible = true;
-      this.buttonMesh.position.set(t.innerX * 0.55, 0.05, t.innerZ * 0.55);
+      const bp = this.feltPoint(t.angle, 0.95);
+      this.buttonMesh.position.set(bp.x, 0.05, bp.z);
     } else {
       this.buttonMesh.visible = false;
     }

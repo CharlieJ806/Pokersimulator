@@ -72,8 +72,14 @@ ALLOWED_ORIGINS = ""
 #   (从 src/shared/providers.mjs 推导,加厂商会自动同步)。
 #   用自己的中转站 / 自建服务时填这里,例如:
 #     EXTRA_ALLOWED_HOSTS = "api.my-proxy.com,llm.internal.corp"
+#
+#   cf.api.fan = PackyAPI 的接口主机。
+#   ⚠️ 注意它**不是** packyapi.ai —— 那是文档站,接口在另一个域名上,
+#      填错了会被白名单拦掉,报「目标域名不在白名单里」。
+#      (PackyAPI 官方文档:主站 Endpoint 是 https://cf.api.fan,
+#       OpenAI 兼容客户端在后加 /v1。)
 # ─────────────────────────────────────────────────────────────
-EXTRA_ALLOWED_HOSTS = ""
+EXTRA_ALLOWED_HOSTS = "cf.api.fan"
 
 # 观测:开发时 wrangler tail 可以看实时日志
 [observability]

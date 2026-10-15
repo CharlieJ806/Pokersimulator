@@ -10,6 +10,8 @@ CC BY-NC-SA 4.0)**不是同一个来源**,授权状态需要使用者自行确�
 | 角色 | 本地文件 | 原始文件 | 尺寸(裁切后) |
 | --- | --- | --- | --- |
 | Grok | `assets/portraits/grok/idle.webp` | `fbc7df732a46f48f3851212183e60619.jpg` | 609×606 |
+| Kimi | `assets/portraits/kimi/idle.webp` | `0a9867af-cbac-4fef-8143-e957160d53de.png` | 387×668 |
+| MiMo | `assets/portraits/mimo/idle.webp` | `e3c79e60-e3e2-4fa9-87f7-a4dd803eda60.png` | 258×415 |
 | Qwen | `assets/portraits/qwen/idle.webp` | `69eff6768c11ef68f179d9ac3f9101f3.jpg` | 693×760 |
 
 ## 处理方式

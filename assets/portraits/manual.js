@@ -22,6 +22,36 @@ export default {
       },
       "source": "manual"
     },
+    "kimi": {
+      "id": "kimi",
+      "name": "Kimi",
+      "accent": "#5b6fc4",
+      "greeting": "",
+      "states": {
+        "idle": {
+          "file": "idle.webp",
+          "from": "0a9867af-cbac-4fef-8143-e957160d53de.png",
+          "w": 387,
+          "h": 668
+        }
+      },
+      "source": "manual"
+    },
+    "mimo": {
+      "id": "mimo",
+      "name": "MiMo",
+      "accent": "#f08a24",
+      "greeting": "",
+      "states": {
+        "idle": {
+          "file": "idle.webp",
+          "from": "e3c79e60-e3e2-4fa9-87f7-a4dd803eda60.png",
+          "w": 258,
+          "h": 415
+        }
+      },
+      "source": "manual"
+    },
     "qwen": {
       "id": "qwen",
       "name": "Qwen",

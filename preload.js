@@ -23,7 +23,12 @@ contextBridge.exposeInMainWorld('pokerAPI', {
    * 发起一次流式对话请求。
    * @param {{provider:string,kind?:string,endpoint:string,apiKey:string,model:string,
    *          system:string,user:string,temperature?:number,maxTokens?:number,timeoutMs?:number,
+   *          reasoningLevel?:'off'|'low'|'default',omit?:string[],requestExtra?:object,
    *          requestId:string}} spec
+   *   reasoningLevel 与 omit 都是**主进程侧 buildRequest 要用的字段**:
+   *   前者决定四条协议各自发什么思考参数,后者是参数降级重试要摘掉的字段名。
+   *   IPC 只是原样转发 spec,所以这里少列一个字段不会报错,只会静默变成死字段 ——
+   *   加新字段时记得同步这份注释(它是调用方唯一能看到的接口说明)。
    * @param {{onDelta?:(delta:string, full:string, thinking:boolean)=>void, onReset?:()=>void}} hooks
    *   onDelta 的 thinking=true 表示这是「推理阶段」的增量(界面可弱化显示);
    *   onReset 在推理结束、正式回答开始时触发一次。

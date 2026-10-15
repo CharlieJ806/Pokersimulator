@@ -12,6 +12,15 @@
  */
 
 import { PERSONAS } from '../ai/personas.js';
+import { RELAY_PROTOCOLS, normalizeProtocol } from '../shared/llmStream.mjs';
+// 连通性测试的判定逻辑放在共享模块里,不写在这儿 —— 那部分要能被
+// `node tools/relayprobe.mjs` 纯 Node 直接跑(见 shared/llmProbe.mjs 的头注释)
+import { runProbe, describeProbe, seatProbeSpec, keyProbeSpec } from '../shared/llmProbe.mjs';
+
+/** 拼进 innerHTML 的用户输入(模型名、Key 显示名)一律转义 —— 引号还会截断 value 属性 */
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
 
 function el(tag, className, text) {
   const n = document.createElement(tag);
@@ -62,8 +71,23 @@ export function createModelsPanel(root, opts = {}) {
 
           <h3 style="margin-top:16px">自定义中转站</h3>
           <p class="models__hint">
-            一个地址 + 多个 Key(每个 Key 能调的模型可能不同)。地址填 OpenAI 兼容的
-            <b>/chat/completions</b> 完整地址;座位那里选 Key、填模型名即可。
+            一个地址 + 多个 Key。地址填到 <b>/v1</b> 为止(例如
+            <b>https://cf.api.fan/v1</b>),程序会按每个 Key 选的**协议**自动补上
+            后面的路径;填完整路径也能认。
+            <br>⚠️ <b>协议要按令牌分组选,不是按中转站选</b> —— 同一个中转站里,
+            不同分组的令牌协议不同。以 PackyAPI 为例(模型卡片上有协议标签):
+            <br>· Claude 系(<b>CC</b> 等分组)标 <b>ANTHROPIC</b> → 选「Anthropic」
+            <br>· <b>Codex / gpt-officially</b> 分组、<b>Kimi-sale</b> 的 kimi-k3 标
+            <b>OPENAI-RESPONSE</b> → 选「OpenAI Responses」
+            <br>· 没标或标 <b>OPENAI</b> 的(deepseek / gemini-flash / glm-flash / qwen-flash 等)
+            → 选「OpenAI 兼容」
+            <br>· Gemini 的**原生**格式分组(中转站标 <b>GOOGLE</b>、走
+            <b>…/models/{模型}:streamGenerateContent</b> 那种口,或直连
+            generativelanguage.googleapis.com)→ 选「Google (Gemini)」。这个协议不用把路径填全:
+            地址填到域名或 <b>/v1</b> 都行,程序会自己补路径,
+            并把思考预算压到最低档(牌桌不需要长考,默认开满思考会等到超时)
+            <br>选错的典型报错是 <b>protocol_not_supported</b>(模型不支持 chat completions 协议);
+            <b>model_not_found / 无可用渠道</b> 则是令牌分组不对,要去中转站控制台换分组。
             <br>⚠️ 用网页版(Worker 转发)时,还要把中转站域名加到 Worker 的
             <b>EXTRA_ALLOWED_HOSTS</b>,否则会被白名单拦掉;桌面版没有这个限制。
           </p>
@@ -72,6 +96,24 @@ export function createModelsPanel(root, opts = {}) {
             <input type="text" id="customEndpoint" spellcheck="false"
                    placeholder="https://你的中转站/v1/chat/completions">
           </label>
+          <label class="field">
+            <span>推理档位</span>
+            <select id="reasoningLevel">
+              <option value="low">最低(默认 · 保留推理但压到最小)</option>
+              <option value="default">厂商默认(不设防)</option>
+              <option value="off">完全关闭(不推荐)</option>
+            </select>
+          </label>
+          <p class="models__hint">
+            默认<b>最低</b>:保留推理但压到最小 —— 别选关闭,除非你确定这个模型不需要推理。
+            <br>推理 token 和正式回答<b>共用同一个额度</b>:不压的话,模型会先想很久
+            (实测有一次等了 78 秒直接超时),或者把额度全用在推理上、
+            正式那一个 JSON 一个字都没吐出来(界面会报「模型没有给出可识别的动作」)。
+            <br>· <b>最低</b> = 四条协议各自发自己的最低档字段(OpenAI 的 reasoning_effort、
+            Gemini 的 thinkingBudget、Anthropic 的 budget_tokens、Responses 的 reasoning.effort)。
+            <br>· <b>完全关闭</b> = 一个字段都不发,模型连草稿都不打 —— 难题上会降智。
+            <br>· <b>厂商默认</b> = 什么都不配,由上游自己决定(推理型模型会想很久)。
+          </p>
           <div class="keylist" id="customKeyList"></div>
           <button class="btn btn--ghost btn--tiny" id="customKeyAdd" type="button">+ 添加 Key</button>
         </section>
@@ -135,23 +177,51 @@ export function createModelsPanel(root, opts = {}) {
       const row = el('div', 'keyrow');
       row.innerHTML = `
         <div class="keyrow__head">
-          <input type="text" class="ckey__label" data-ckey-label="${k.id}" value="${k.label || `Key ${i + 1}`}"
-                 placeholder="用处(例如 便宜模型)" spellcheck="false">
-          <button class="btn btn--ghost btn--tiny" data-ckey-del="${k.id}" type="button">删除</button>
+          <input type="text" class="ckey__label" data-ckey-label="${esc(k.id)}" value="${esc(k.label || `Key ${i + 1}`)}"
+                 placeholder="用处(例如 Claude / 便宜模型)" spellcheck="false">
+          <button class="btn btn--ghost btn--tiny" data-ckey-del="${esc(k.id)}" type="button">删除</button>
         </div>
-        <input type="password" data-ckey="${k.id}" value="${k.key || ''}" placeholder="sk-..." autocomplete="off" spellcheck="false">
+        <label class="ckey__proto">
+          <span>协议</span>
+          <select data-ckey-proto="${esc(k.id)}">${protocolOptions(k.protocol)}</select>
+        </label>
+        <input type="password" data-ckey="${esc(k.id)}" value="${esc(k.key || '')}" placeholder="sk-..." autocomplete="off" spellcheck="false">
+        <div class="keyrow__foot">
+          <button class="btn btn--ghost btn--tiny" data-ckey-test="${esc(k.id)}" type="button"
+                  title="测这个 Key 的地址 + 协议 + 密钥通不通(模型名用便宜的占位)">测试</button>
+          <span class="probetx" data-ckey-probe="${esc(k.id)}" role="status" aria-live="polite"></span>
+        </div>
       `;
       list.appendChild(row);
     });
+    for (const btn of list.querySelectorAll('[data-ckey-test]')) {
+      btn.addEventListener('click', (e) => {
+        // 先把 currentTarget 拿出来:下面 await 之后事件对象的 currentTarget 会被清空
+        testCustomKey(e.currentTarget.dataset.ckeyTest, e.currentTarget);
+      });
+    }
     for (const btn of list.querySelectorAll('[data-ckey-del]')) {
       btn.addEventListener('click', () => {
         const id = btn.dataset.ckeyDel;
         // 先收一遍当前输入再删,免得把别的行刚打的字丢了
         state.customKeys = collectCustomKeys().filter((k) => k.id !== id);
+        keepSeatEdits();
         renderCustomKeys();
         renderSeats();
       });
     }
+  }
+
+  /**
+   * 协议下拉。选项来自共享模块的 RELAY_PROTOCOLS —— 界面能选的值和
+   * 底层 buildRequest 认的 kind 是同一份清单,不会对不上。
+   */
+  function protocolOptions(selected) {
+    const cur = normalizeProtocol(selected);
+    return RELAY_PROTOCOLS.map((p) => {
+      const label = `${p.name}(${p.hint})`;
+      return `<option value="${esc(p.id)}"${p.id === cur ? ' selected' : ''}>${esc(label)}</option>`;
+    }).join('');
   }
 
   /** 只读当前 DOM 里的 Key 行(新增/删除时用,避免覆盖用户刚输入的内容) */
@@ -162,7 +232,14 @@ export function createModelsPanel(root, opts = {}) {
       const keyEl = row.querySelector('[data-ckey]');
       if (!keyEl) continue;
       const id = keyEl.dataset.ckey;
-      out.push({ id, label: (labelEl?.value || '').trim(), key: keyEl.value.trim() });
+      const protoEl = row.querySelector('[data-ckey-proto]');
+      out.push({
+        id,
+        label: (labelEl?.value || '').trim(),
+        key: keyEl.value.trim(),
+        // 缺省 openai:老配置没有这个字段,按最常见的形态处理
+        protocol: normalizeProtocol(protoEl?.value),
+      });
     }
     return out;
   }
@@ -180,7 +257,7 @@ export function createModelsPanel(root, opts = {}) {
     const out = [];
     for (const k of keys) {
       const label = (k.label || '').trim() || k.id;
-      out.push(`<option value="${k.id}"${k.id === selected ? ' selected' : ''}>${label}</option>`);
+      out.push(`<option value="${esc(k.id)}"${k.id === selected ? ' selected' : ''}>${esc(label)}</option>`);
     }
     if (!out.length) out.push('<option value="">(中转站未配)</option>');
     return out.join('');
@@ -251,7 +328,7 @@ export function createModelsPanel(root, opts = {}) {
       row.innerHTML = `
         <div class="seatsetting__who">
           <span class="seatsetting__avatar" style="${av}">${persona.avatarSvg ? '' : (persona.emoji || '🙂')}</span>
-          <span class="seatsetting__name">${shown}</span>
+          <span class="seatsetting__name">${esc(shown)}</span>
           <span class="seatsetting__tag">${persona.tag || ''}</span>
         </div>
         <select data-seat-provider="${seat}">${providerOptions(true)}</select>
@@ -261,6 +338,16 @@ export function createModelsPanel(root, opts = {}) {
           ${personaOptions(state.seatPersonas?.[seat] || '')}
         </select>
       `;
+      // 「测试」按钮 + 结果:单独占满一行(grid-column: 1/-1,见 CSS)。
+      // 为什么不挤进上面那一行:手机上面板很窄,5 个控件已经要换行,
+      // 再塞一个按钮就把模型名输入框压成一条缝了。
+      const testBox = el('div', 'seatsetting__test');
+      testBox.innerHTML = `
+        <button class="btn btn--ghost btn--tiny" data-seat-test="${seat}" type="button"
+                title="测这个座位的接口地址 + Key + 协议 + 模型名 —— 不用开局就能知道配置能不能调通">测试</button>
+        <span class="probetx" data-seat-probe="${seat}" role="status" aria-live="polite"></span>
+      `;
+      row.appendChild(testBox);
       box.appendChild(row);
       const ps = row.querySelector(`[data-seat-provider="${seat}"]`);
       const ms = row.querySelector(`[data-seat-model="${seat}"]`);
@@ -271,7 +358,24 @@ export function createModelsPanel(root, opts = {}) {
         ms.value = '';
         ms.placeholder = ps.value ? `模型(默认 ${(providers.find((p) => p.id === ps.value)?.defaultModel) || '—'})` : '模型(跟随默认)';
       });
+      testBox.querySelector('[data-seat-test]').addEventListener('click', (e) => {
+        testSeat(seat, e.currentTarget);
+      });
     }
+  }
+
+  /**
+   * 把座位行里**还没保存**的修改收进 state。
+   * renderSeats() 只按 state 画,增删中转站 Key 时要重画座位行 ——
+   * 不先收一遍的话,刚改的厂商 / 模型名 / 性格会被恢复原样。
+   */
+  function keepSeatEdits() {
+    if (!wrap.querySelector('[data-seat-provider]')) return;
+    const c = collect();
+    state.seatProviders = c.seatProviders;
+    state.seatModels = c.seatModels;
+    state.seatPersonas = c.seatPersonas;
+    state.seatCustomKeys = c.seatCustomKeys;
   }
 
   function collect() {
@@ -299,6 +403,12 @@ export function createModelsPanel(root, opts = {}) {
     }
     // 中转站的 Key:只留填了密钥的行(显示名可留空)
     const customKeys = collectCustomKeys().filter((k) => k.key);
+    // 座位选的 Key 如果被丢掉了(没填密钥),别存一个悬空的 id ——
+    // 运行时会悄悄换成第一个 Key,配着别的 Key 的模型名去调,多半 403/404
+    const keptIds = new Set(customKeys.map((k) => k.id));
+    for (const seat of Object.keys(seatCustomKeys)) {
+      if (seatCustomKeys[seat] && !keptIds.has(seatCustomKeys[seat])) seatCustomKeys[seat] = null;
+    }
     return {
       defaultProvider: q('defProvider').value,
       model: q('defModel').value.trim(),
@@ -308,15 +418,113 @@ export function createModelsPanel(root, opts = {}) {
       seatPersonas,
       seatCustomKeys,
       customEndpoint: q('customEndpoint')?.value.trim() || '',
+      // 推理档位:与接口地址同一个区块、同一条「界面 → 配置」的路。
+      // 认不出的值一律回落到最低档(见 llmStream.mjs 的 normalizeReasoningLevel)——
+      // 少了这个兜底,老配置(没有这个字段)会让下拉显示空白,用户以为档位丢了。
+      reasoningLevel: q('reasoningLevel')?.value || 'low',
       customKeys,
     };
+  }
+
+  /* ---------------- 连通性测试 ----------------
+   *
+   * 目的:不用开局就能知道「这个座位/这个 Key 到底能不能调通」。
+   * 三件必须做到的事(都是踩过坑总结的):
+   *   ① 走 window.pokerAPI.llmChat —— 网页版只有 Worker 转发这条路,
+   *      自己 fetch 目标地址会因 CORS/白名单失败,把能用的配置判成不通;
+   *   ② 测的是**面板里此刻**的配置(含还没保存的改动),不是上次保存的旧配置;
+   *   ③ 失败时把上游原文照登 —— 用户排查靠的就是 protocol_not_supported /
+   *      model_not_found 这几个词,写「调用失败」等于没写。
+   */
+
+  /**
+   * 组装「测试用」的配置快照。
+   * 复用 collect():它读的就是 DOM 里的现值,顺手也把中转站地址/各 Key 的协议算好了。
+   */
+  function testCfgSnapshot() {
+    const c = collect();
+    return { ...c, providerList: providers, game: { seats: state.seats } };
+  }
+
+  /** 写结果文本(三种状态:测试中… / ✅ / ❌) */
+  function setProbeText(node, view, result) {
+    if (!node) return;
+    // ⚠️ 一律用 textContent 拼。这里是**上游返回的原文**,走 innerHTML
+    //    就是一个现成的注入口子(中转站的错误体里放一段标签就能打进页面)。
+    node.textContent = '';
+    node.classList.remove('probetx--run', 'probetx--ok', 'probetx--err');
+    node.classList.add(`probetx--${view.tone}`);
+    node.appendChild(document.createTextNode(view.main || ''));
+    if (view.detail) node.appendChild(el('div', 'probetx__sub', view.detail));
+    if (result?.error) {
+      // 界面上按窄屏需要截断了,全文另外留一份:鼠标悬停能看到,
+      // 排障时也能直接从 DOM 里把一字不改的原文捞出来
+      node.title = result.error;
+      node.dataset.probeRaw = result.error;
+    } else {
+      node.removeAttribute('title');
+      delete node.dataset.probeRaw;
+    }
+  }
+
+  /**
+   * 跑一次测试,结果内联在按钮旁边。
+   * @param {HTMLButtonElement} btn 用来禁用防连点
+   * @param {{spec?:object,error?:string}} built 请求(或「配置缺项」的说明,连请求都不发)
+   */
+  async function runTest(btn, built) {
+    const node = btn.parentElement?.querySelector('.probetx');
+    btn.disabled = true;                    // 防连点:测试要花钱,连点就是连花
+    const prev = btn.textContent;
+    btn.textContent = '…';
+    setProbeText(node, { tone: 'run', main: '测试中…' }, null);
+    try {
+      const r = await runProbe(built);
+      setProbeText(node, describeProbe(r), r);
+    } catch (err) {
+      // runProbe 把所有异常都收成失败结果了;能走到这里说明是它自己出 bug。
+      // 也必须显示出来 —— 否则按钮永远停在「测试中…」,用户只能重开面板。
+      setProbeText(node, { tone: 'err', main: `❌ 测试本身出错:${err?.message || err}` }, null);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = prev || '测试';
+    }
+  }
+
+  /** 座位测试:地址 + 该座位选的 Key + 该 Key 的协议 + 模型名 */
+  async function testSeat(seat, btn) {
+    let built;
+    try {
+      // 配置组装交给 app.js 的 agentCfg(见 createModelsPanel 的 testSpec 回调)——
+      // 「座位该用哪个厂商/Key/模型」的规则只有那一份,这里绝不重算一遍
+      built = opts.testSpec
+        ? seatProbeSpec(opts.testSpec(testCfgSnapshot(), seat))
+        : { error: '面板没有接到座位配置的组装函数(内部错误)' };
+    } catch (err) {
+      built = { error: `组装座位配置时出错:${err?.message || err}` };
+    }
+    await runTest(btn, built);
+  }
+
+  /** Key 测试:地址 + 协议 + 密钥(模型名用便宜的占位,见 shared/llmProbe.mjs) */
+  async function testCustomKey(id, btn) {
+    const row = [...wrap.querySelectorAll('#customKeyList .keyrow')]
+      .find((r) => r.querySelector('[data-ckey]')?.dataset.ckey === id);
+    await runTest(btn, keyProbeSpec({
+      endpoint: q('customEndpoint')?.value || '',
+      apiKey: row?.querySelector('[data-ckey]')?.value || '',
+      protocol: row?.querySelector('[data-ckey-proto]')?.value,
+    }));
   }
 
   function fill(cfg) {
     providers = cfg.providerList || providers;
     let customKeys = Array.isArray(cfg.customKeys) ? cfg.customKeys.filter((k) => k && k.key) : [];
+    // 老配置没有 protocol 字段 → 补 'openai'(最常见形态)。
+    // 不补的话下拉会显示空白,用户以为协议丢了。
+    customKeys = customKeys.map((k) => ({ ...k, protocol: normalizeProtocol(k.protocol) }));
     // 一个 Key 都没有时先给一行空的,免得用户找不到入口
-    if (!customKeys.length) customKeys = [{ id: 'k1', label: 'Key 1', key: '' }];
+    if (!customKeys.length) customKeys = [{ id: 'k1', label: 'Key 1', key: '', protocol: 'openai' }];
     state = {
       defaultProvider: cfg.defaultProvider || 'deepseek',
       seatProviders: cfg.seatProviders || {},
@@ -324,6 +532,7 @@ export function createModelsPanel(root, opts = {}) {
       seatPersonas: cfg.seatPersonas || {},
       seatNames: state.seatNames || {},
       customEndpoint: cfg.customEndpoint || '',
+      reasoningLevel: cfg.reasoningLevel || 'low',
       customKeys,
       seatCustomKeys: cfg.seatCustomKeys || {},
       keys: cfg.keys || {},
@@ -334,6 +543,7 @@ export function createModelsPanel(root, opts = {}) {
     if (!q('keyList')) return;
     renderKeys();
     if (q('customEndpoint')) q('customEndpoint').value = state.customEndpoint || '';
+    if (q('reasoningLevel')) q('reasoningLevel').value = state.reasoningLevel || 'low';
     renderDefault();
     renderSeats();
     updateInfo();
@@ -368,7 +578,8 @@ export function createModelsPanel(root, opts = {}) {
     let n = cur.length + 1;
     let id = `k${n}`;
     while (used.has(id)) { n++; id = `k${n}`; }
-    state.customKeys = [...cur, { id, label: `Key ${n}`, key: '' }];
+    state.customKeys = [...cur, { id, label: `Key ${n}`, key: '', protocol: 'openai' }];
+    keepSeatEdits();
     renderCustomKeys();
     renderSeats();
   });

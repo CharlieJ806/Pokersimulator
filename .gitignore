@@ -30,6 +30,10 @@ shots/
 #        fetchportraits.mjs       从 crosspet 取 6 套立绘
 #        prepmanualportraits.mjs  处理手工素材(白底抠图 → WebP)
 #        _webpsize.mjs            fetchportraits 依赖它读 WebP 尺寸
+#        prepdecor.mjs            后墙挂画:assets/Background → assets/decor/painting.jpg
+#   3) 防回归、且无需 Key 就能跑的:
+#        relaycompat.mjs          中转站各家模型的参数兼容(假中转站,走真实调用路径)
+#        navflow.mjs              主页 / 设置页 / 模型面板之间的导航
 #
 # 其余(audit_* / *test* / *check* / 各种 sweep、diag、probe)全部忽略。
 # 想恢复某个脚本,在下面加一行 `!tools/xxx.mjs` 即可。
@@ -41,6 +45,9 @@ tools/*
 !tools/fetchportraits.mjs
 !tools/prepmanualportraits.mjs
 !tools/_webpsize.mjs
+!tools/prepdecor.mjs
+!tools/relaycompat.mjs
+!tools/navflow.mjs
 
 # wrangler files
 .wrangler

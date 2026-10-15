@@ -33,7 +33,7 @@ const PERSONA_LIST = [
   ['maniac', '疯子李', '极激进:什么牌都想打'],
 ];
 
-export function createSetup(root, { onStart, onSaveAI, onExitHome, mode = 'lobby' } = {}) {
+export function createSetup(root, { onStart, onSaveAI, onExitHome, onBack, onModels, mode = 'lobby' } = {}) {
   const wrap = el('div', `setup setup--${mode}`);
   wrap.innerHTML = `
     <div class="setup__card">
@@ -43,6 +43,7 @@ export function createSetup(root, { onStart, onSaveAI, onExitHome, mode = 'lobby
           <p class="setup__sub" id="setupSub"></p>
         </div>
         ${mode === 'drawer' ? '<button class="btn btn--ghost" id="setupClose">✕ 关闭</button>' : ''}
+        ${mode === 'lobby' ? '<button class="btn btn--ghost" id="setupBack" title="回到主页重新选模式">← 返回主页</button>' : ''}
       </div>
 
       <div class="setup__body">
@@ -92,7 +93,10 @@ export function createSetup(root, { onStart, onSaveAI, onExitHome, mode = 'lobby
         <section class="setup__col">
           <h3>AI 与节奏</h3>
           <label class="field">
-            <span>AI 用哪家模型 <i class="hint-inline">想逐个角色分配,进牌桌后用顶栏「🤖 模型」</i></span>
+            <span class="field__labelRow">AI 默认用哪家模型
+              <!-- 开局前就能逐座位配:以前只能进了牌桌再从顶栏改 -->
+              <button type="button" class="btn btn--ghost btn--tiny" id="btnSeatModels">🤖 逐座位分配模型 / 中转站</button>
+            </span>
             <select id="provider"></select>
           </label>
           <label class="field field--grid2">
@@ -237,7 +241,8 @@ export function createSetup(root, { onStart, onSaveAI, onExitHome, mode = 'lobby
     q('blindLevelUp').checked = !!g.blindLevelUp;
     renderProviders();
     q('provider').value = values.defaultProvider || 'deepseek';
-    q('model').value = values.seatModels?.[0] || '';
+    // 「默认模型」存在 values.model(模型面板里的「默认」也是它);留空时 syncModels 补厂商默认
+    q('model').value = values.model || '';
     q('thinkDelayMs').value = ((ui.thinkDelayMs ?? 900) / 1000).toFixed(1);
     q('flowMode').value = ui.flowMode || 'manual';
     q('autoNextHand').checked = !!ui.autoNextHand;   // 默认关:结算画面要看清
@@ -245,7 +250,8 @@ export function createSetup(root, { onStart, onSaveAI, onExitHome, mode = 'lobby
     q('rememberPlayers').checked = ui.rememberPlayers !== false;
     q('notesEvery').value = (ui.notesEvery === undefined ? 3 : ui.notesEvery);
     q('showThinking').checked = ui.showThinking !== false;
-    syncModels(false);
+    // 保留已保存的模型名(以前传 false,每次打开设置都被重置成厂商默认,用户的选择被冲掉)
+    syncModels(true);
     syncLabels();
   }
 
@@ -277,14 +283,36 @@ export function createSetup(root, { onStart, onSaveAI, onExitHome, mode = 'lobby
       + `盲注 ${sb}/${bb}${extras.length ? ' · ' + extras.join(' · ') : ''} · ${mode} · ${memText}`;
   }
 
+  /**
+   * 把输入框里的数整理成合法值,并**写回输入框**(让人看得到被改成了什么)。
+   * 不校验的话:小盲 > 大盲时最小加注额比跟注额还低;大盲清空成 0 时底部显示
+   * 「Infinity 个大盲」;初始筹码 0 / 负数时每次发牌都抛「至少需要 2 名有筹码的玩家」。
+   */
+  function sanitizeNumbers() {
+    const int = (id, min, dflt) => {
+      const v = Math.floor(Number(q(id).value));
+      return Number.isFinite(v) && v >= min ? v : dflt;
+    };
+    const bigBlind = int('bigBlind', 2, 20);
+    const smallBlind = Math.min(int('smallBlind', 1, Math.max(1, Math.floor(bigBlind / 2))), bigBlind);
+    const startingStack = Math.max(int('startingStack', 1, 2000), bigBlind * 2);
+    const ante = Math.min(int('ante', 0, 0), startingStack);
+    q('bigBlind').value = bigBlind;
+    q('smallBlind').value = smallBlind;
+    q('startingStack').value = startingStack;
+    q('ante').value = ante;
+    return { bigBlind, smallBlind, startingStack, ante };
+  }
+
   function collect() {
+    const nums = sanitizeNumbers();
     const game = {
       seats: Number(q('seats').value),
       shortDeck: q('shortDeck').value === 'true',
-      startingStack: Number(q('startingStack').value),
-      smallBlind: Number(q('smallBlind').value),
-      bigBlind: Number(q('bigBlind').value),
-      ante: Number(q('ante').value),
+      startingStack: nums.startingStack,
+      smallBlind: nums.smallBlind,
+      bigBlind: nums.bigBlind,
+      ante: nums.ante,
       bigBlindAnte: q('bigBlindAnte').checked,
       blindLevelUp: q('blindLevelUp').checked,
       blindUpEvery: 0,
@@ -294,7 +322,7 @@ export function createSetup(root, { onStart, onSaveAI, onExitHome, mode = 'lobby
     const key = q('apiKey').value.trim();
     if (key) ai.keys = { [providerId]: key };
     const ui = {
-      thinkDelayMs: Math.round((Number(q('thinkDelayMs').value) || 0) * 1000),
+      thinkDelayMs: Math.round(Math.max(0, Math.min(5, Number(q('thinkDelayMs').value) || 0)) * 1000),
       flowMode: q('flowMode').value,
       // 与 flowMode 独立:节奏模式管「AI 之间怎么推进」,
       // 这个管「一手打完要不要自动开下一手」。默认 false。
@@ -302,7 +330,7 @@ export function createSetup(root, { onStart, onSaveAI, onExitHome, mode = 'lobby
       // AI 记性:开启后每个 AI 会跨手累积对对手(含你)的判断。
       // notesEvery = 每几手整理一次;0 等于关掉(不额外花调用)。
       rememberPlayers: q('rememberPlayers').checked,
-      notesEvery: Math.max(0, Number(q('notesEvery').value) || 0),
+      notesEvery: Math.max(0, Math.min(20, Math.floor(Number(q('notesEvery').value) || 0))),
       showThinking: q('showThinking').checked,
     };
     return { game, ai, ui };
@@ -315,13 +343,18 @@ export function createSetup(root, { onStart, onSaveAI, onExitHome, mode = 'lobby
     q(id).addEventListener('change', syncLabels);
   }
   q('flowMode').addEventListener('change', syncLabels);
-  q('provider').addEventListener('change', () => syncModels(true));
+  // 换厂商时模型名换成新厂商的默认 —— 保留旧的会出现「OpenAI + deepseek-flash」这种对不上的组合
+  q('provider').addEventListener('change', () => syncModels(false));
   q('apiKey').addEventListener('input', refreshNote);
   q('bigBlind').addEventListener('change', () => {
     const sb = Number(q('smallBlind').value) || 10;
     if (Number(q('bigBlind').value) < sb) q('bigBlind').value = sb * 2;
     syncLabels();
   });
+  // 小盲那边以前没有检查:大盲 20、小盲改成 50 也能开局
+  for (const id of ['smallBlind', 'startingStack', 'ante']) {
+    q(id).addEventListener('change', () => { sanitizeNumbers(); syncLabels(); });
+  }
 
   function setApiNote(hasKey) {
     if (cfg) cfg.hasKey = hasKey;
@@ -352,6 +385,23 @@ export function createSetup(root, { onStart, onSaveAI, onExitHome, mode = 'lobby
   });
 
   q('setupClose')?.addEventListener('click', () => hide());
+  // 开局设置页以前没有任何返回入口,选错模式只能刷新页面
+  q('setupBack')?.addEventListener('click', () => { hide(); onBack?.(); });
+  // 把**当前滑杆上的人数**带过去:还没开局,配置里的人数可能还是上次的
+  q('btnSeatModels')?.addEventListener('click', () => onModels?.(Number(q('seats').value) || 6));
+
+  /**
+   * 模型面板保存之后,只同步「默认厂商 / 默认模型」这两格。
+   * 不能整份 fill():那会把用户在这一页改了但还没保存的人数、盲注等冲掉;
+   * 也不能不同步:开局时 collect() 会把这里的旧值写回配置,刚在模型面板改的默认厂商就被覆盖了。
+   */
+  function syncAI(values) {
+    if (!values) return;
+    cfg = { ...(cfg || {}), ...values };
+    if (values.defaultProvider) q('provider').value = values.defaultProvider;
+    q('model').value = values.model || '';
+    syncModels(true);
+  }
 
   q('btnExitHome')?.addEventListener('click', () => {
     // 先保存当前设置(下次进来还是这套),再退出
@@ -374,14 +424,16 @@ export function createSetup(root, { onStart, onSaveAI, onExitHome, mode = 'lobby
     const sub = q('setupSub');
     if (sub) {
       sub.innerHTML = on
-        ? '你自己上桌打。<b style="color:#e9c46a">牌局进行中看不到别家的牌与思考</b>,'
+        ? '你自己上桌打。<b>牌局进行中看不到别家的牌与思考</b>,'
           + '这一手结束后可以在「上一手记录」里回看。'
         : '你是荷官:坐在桌边发牌、控节奏、看每个人的想法。'
-          + '<b style="color:#e9c46a">你自己不参与下注也没有手牌</b>,桌上全是独立的大模型牌手。';
+          + '<b>你自己不参与下注也没有手牌</b>,桌上全是独立的大模型牌手。';
     }
     const start = q('btnStart');
     if (start && mode === 'lobby') start.textContent = on ? '开始牌局' : '开始';
+    // 底部汇总里的「+ 你(荷官)/ 你(上桌打)」也跟着变(以前要等改了某个输入才刷新)
+    syncLabels();
   }
 
-  return { show, hide, destroy, fill, collect, setApiNote, setPlayerMode, el: wrap };
+  return { show, hide, destroy, fill, collect, setApiNote, setPlayerMode, syncAI, el: wrap };
 }

@@ -16,7 +16,7 @@
  * 用法:
  *   git clone --depth 1 --filter=blob:none --sparse https://github.com/lokicorvus/crosspet.git _crosspet
  *   cd _crosspet && git sparse-checkout set characters/claude characters/deepseek \
- *       characters/deepseek-hoodie characters/gemini characters/glm characters/gpt
+ *       characters/gemini characters/glm characters/gpt
  *   node tools/fetchportraits.mjs [--src <clone 路径>]
  */
 import fs from 'node:fs';
@@ -50,7 +50,8 @@ const STATES = {
 };
 
 /** 只收有对应模型的角色;egg-* 那几套只有 4 张图,不是全身立绘 */
-const CHARS = ['claude', 'deepseek', 'deepseek-hoodie', 'gemini', 'glm', 'gpt'];
+// deepseek-hoodie 已移除(和 deepseek 是同一个模型的两套,只会造成「同模型两种长相」)
+const CHARS = ['claude', 'deepseek', 'gemini', 'glm', 'gpt'];
 
 if (!fs.existsSync(SRC)) {
   log(`!! 找不到源目录: ${SRC}`);

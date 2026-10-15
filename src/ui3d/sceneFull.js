@@ -32,6 +32,11 @@ function el(tag, className, text) {
   return n;
 }
 
+/** 名字来自模型名(中转站里可以是任意字符串),拼进 innerHTML 前要转义 */
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
 export function fmt(n) {
   const v = Math.round(n || 0);
   if (Math.abs(v) >= 10000) return (v / 1000).toFixed(v % 1000 === 0 ? 0 : 1) + 'k';
@@ -77,12 +82,14 @@ export class SceneTable {
           </div>
           <div class="topbar__center"><span class="street" id="streetTag">等待开局</span></div>
           <div class="topbar__right">
-            <button class="btn btn--ghost" id="btnPeek" title="切换底牌可见度:盖着 → 只看公共牌 → 全部翻开">🂠 底牌 <b>盖着</b></button>
-            <button class="btn btn--ghost" id="btnThink" title="是否显示 AI 的思考气泡">💭 气泡 <b>开</b></button>
-            <button class="btn btn--ghost" id="btnThinkLog" title="完整的思考记录">🧠 思考记录</button>
-            <button class="btn btn--ghost" id="btnModels" title="给每个 AI 分配不同的模型">🤖 模型</button>
-            <button class="btn btn--ghost" id="btnLog" title="牌局日志">📜 <span id="logBtnLabel">荷官记录</span></button>
-            <button class="btn btn--ghost" id="btnSetup" title="牌局设置 / 退出本局">⚙ 设置</button>
+            <!-- 文字包在 .btn__label 里:手机上只留图标(mobile.css),
+                 否则六个按钮横向放不下,右边的「设置」会被挤出屏幕、点不到 -->
+            <button class="btn btn--ghost" id="btnPeek" title="切换底牌可见度:盖着 → 只看公共牌 → 全部翻开">🂠<span class="btn__label"> 底牌 <b>盖着</b></span></button>
+            <button class="btn btn--ghost" id="btnThink" title="是否显示 AI 的思考气泡">💭<span class="btn__label"> 气泡 <b>开</b></span></button>
+            <button class="btn btn--ghost" id="btnThinkLog" title="完整的思考记录">🧠<span class="btn__label"> 思考记录</span></button>
+            <button class="btn btn--ghost" id="btnModels" title="给每个 AI 分配不同的模型">🤖<span class="btn__label"> 模型</span></button>
+            <button class="btn btn--ghost" id="btnLog" title="牌局日志">📜<span class="btn__label"> <span id="logBtnLabel">荷官记录</span></span></button>
+            <button class="btn btn--ghost" id="btnSetup" title="牌局设置 / 退出本局">⚙<span class="btn__label"> 设置</span></button>
           </div>
         </header>
 
@@ -264,7 +271,6 @@ export class SceneTable {
   }
 
   /* ---------------- 渲染循环 ---------------- */
-
   _loop() {
     if (!this.running) return;
     const dt = this._clock.getDelta();
@@ -336,7 +342,15 @@ export class SceneTable {
         let x = (this._tmp.x * 0.5 + 0.5) * w;
         const y = (-this._tmp.y * 0.5 + 0.5) * h;
         const bw = this.dom.bubble.offsetWidth || 220;
-        x = Math.max(bw / 2 + 8, Math.min(w - bw / 2 - 8, x));
+        // 侧栏开着时右边那块被它盖住:最右侧座位的气泡要夹在侧栏左边,
+        // 否则只露出一个字(实测宽屏 6 人桌最右那位就是这样)
+        let right = w;
+        const sp = this.dom.sidePanel;
+        if (sp && !sp.classList.contains('is-collapsed')) {
+          const r = sp.getBoundingClientRect();
+          if (r.width > 40) right = Math.min(right, r.left);
+        }
+        x = Math.max(bw / 2 + 8, Math.min(right - bw / 2 - 8, x));
         const by = Math.max(80, y - 44);           // 再往上一点,别压住头顶的指示器
         this.dom.bubble.style.transform =
           `translate(-50%, -100%) translate(${x.toFixed(1)}px, ${by.toFixed(1)}px)`;
@@ -399,7 +413,7 @@ export class SceneTable {
         <div class="handrow handrow--${state}" data-seat="${p.seat}">
           <div class="handrow__who">
             ${dot}
-            <span class="plate__name">${persona?.name || p.name || `座位${p.seat + 1}`}</span>
+            <span class="plate__name">${esc(persona?.name || p.name || `座位${p.seat + 1}`)}</span>
             ${pos ? `<span class="posbadge ${posCls}">${pos === 'BTN' ? 'D' : pos}</span>` : ''}
           </div>
           <div class="handrow__cards">${cardsHtml}</div>
@@ -569,16 +583,27 @@ export class SceneTable {
         bubble.classList.add('bubble--dots');
         txt.innerHTML = '<span class="dots"><i></i><i></i><i></i></span> 正在思考中…';
       }
-    } else if (actionBubble && actionBubble.text) {
-      // 思考收掉之后接着显示「他做了什么」。锚点仍挂在那个人头上
+    } else if (actionBubble && (actionBubble.text || actionBubble.say)) {
+      // 思考收掉之后接着显示「他说了什么 / 他做了什么」。锚点仍挂在那个人头上
       // (定位逻辑读的是 this.thinkingSeat,所以这里也把它指过去)。
+      //
+      // say 是模型**主动说出口**的牌桌发言(可真可诈),摆在主位、加引号;
+      // 动作结果(「跟注 20」)退到下面一行小字当注脚 —— 这样读起来像
+      // 「他说了句话,然后跟了 20」,而不是两个平级的信息堆在一起。
       this.thinkingSeat = actionBubble.seat;
       const persona = ctx.personaMap?.get(actionBubble.seat);
       bubble.hidden = false;
       bubble.classList.remove('bubble--dots', 'bubble--live', 'bubble--anon');
       bubble.classList.add('bubble--action');
+      bubble.classList.toggle('bubble--say', !!actionBubble.say);
       bubble.querySelector('.bubble__who').textContent = persona ? `${persona.name}: ` : '';
-      bubble.querySelector('.bubble__text').textContent = actionBubble.text;
+      const at = bubble.querySelector('.bubble__text');
+      if (actionBubble.say) {
+        at.innerHTML = `<span class="bubble__quote">「${esc(actionBubble.say)}」</span>`
+          + (actionBubble.text ? `<span class="bubble__act">${esc(actionBubble.text)}</span>` : '');
+      } else {
+        at.textContent = actionBubble.text;
+      }
     } else {
       this.thinkingSeat = null;
       bubble.hidden = true;
@@ -688,6 +713,8 @@ export class SceneTable {
   }
 
   setPanel(which) {
+    // 玩家模式下思考记录一律不给看(按钮藏了,但快捷键 / 外部调用仍可能走到这里)
+    if (this.mode === 'player' && which === 'think') which = 'log';
     for (const t of this.dom.tabs) t.classList.toggle('is-active', t.dataset.panel === which);
     this.dom.log.hidden = which !== 'log';
     this.dom.thinkLog.hidden = which !== 'think';

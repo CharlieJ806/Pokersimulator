@@ -83,7 +83,7 @@ export function createReviewPanel(root, { onClose } = {}) {
         ${winners.length
     ? winners.map((w) => {
       const p = (data.players || []).find((x) => x.seat === w.seat);
-      return `<span class="rvwin"><b>${p?.name || '座位' + (w.seat + 1)}</b> +${w.delta.toLocaleString('en-US')}</span>`;
+      return `<span class="rvwin"><b>${escapeHtml(p?.name || '座位' + (w.seat + 1))}</b> +${w.delta.toLocaleString('en-US')}</span>`;
     }).join('')
     : '<span class="review__empty">无人盈利</span>'}
       </span>`;
@@ -98,7 +98,7 @@ export function createReviewPanel(root, { onClose } = {}) {
       return `
         <div class="rvrow rvrow--${state}">
           <div class="rvrow__who">
-            <span class="rvrow__name">${p.name}${p.isMe ? '<span class="rvrow__me">你</span>' : ''}</span>
+            <span class="rvrow__name">${escapeHtml(p.name)}${p.isMe ? '<span class="rvrow__me">你</span>' : ''}</span>
             <span class="rvrow__state">${stateText}</span>
           </div>
           <div class="rvrow__cards">

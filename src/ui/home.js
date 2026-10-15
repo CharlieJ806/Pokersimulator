@@ -30,11 +30,13 @@ const MODES = [
   },
 ];
 
-export function createHome(root, { onPick } = {}) {
+export function createHome(root, { onPick, onModels } = {}) {
   const el = document.createElement('div');
   el.className = 'setup home';
   el.innerHTML = `
     <div class="setup__card setup__card--wide home__card">
+      <!-- 头图:牌室后墙上挂的那幅画(样式里引用 assets/decor/painting.jpg) -->
+      <div class="home__hero" aria-hidden="true"></div>
       <div class="home__brand">
         <div class="home__logo">♠</div>
         <div>
@@ -59,7 +61,14 @@ export function createHome(root, { onPick } = {}) {
       </div>
 
       <div class="setup__foot">
-        <div class="setup__footInfo">模型请求走本机主进程代理,API Key 只存在你自己的设置文件里。</div>
+        <div class="setup__footInfo">${window.pokerAPI?.isWeb
+    ? '模型请求经同源 Worker 转发,API Key 只存在这个浏览器的本地存储里。'
+    : '模型请求走本机主进程代理,API Key 只存在你自己的设置文件里。'}</div>
+        <!-- 开局**之前**也能配模型。
+             以前这个入口只在游戏里的顶栏,于是必须先随便开一局、再进去改 ——
+             而那时候名字/立绘早就按默认模型建好了,用户看到的就是
+             「只能在开局后配,配了又不生效」这个逻辑漏洞。 -->
+        <button class="btn btn--ghost" id="homeModels">⚙ 模型与 API Key</button>
         <!-- 角色立绘的署名 —— CC BY-NC-SA 4.0 要求署名,分发出去的应用里必须看得见。
              完整条款与逐作者署名见 THIRD-PARTY-NOTICES.md 与 assets/portraits/SOURCES.md。 -->
         <div class="setup__credit">
@@ -81,6 +90,10 @@ export function createHome(root, { onPick } = {}) {
       onPick?.(mode);
     });
   });
+
+  // 开局前也能配模型。**不关主页** —— 关掉的话用户配置完还得重新找入口;
+  // 模型面板是盖在最上层的抽屉,回车/保存后回到主页正好接着选模式。
+  q('#homeModels')?.addEventListener('click', () => onModels?.());
 
   function showSoon(card) {
     let note = card.querySelector('.modecard__note');

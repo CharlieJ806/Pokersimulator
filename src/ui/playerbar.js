@@ -85,33 +85,44 @@ export function createPlayerBar(root, { onAct, onReview, onOpenChange } = {}) {
     const { minRaiseTo, maxRaiseTo, pot, toCall, currentBet, bigBlind } = cur;
     const bb = bigBlind || 20;
     const preflop = !cur.hasBoard;
-    const clamp = (v) => Math.max(minRaiseTo, Math.min(maxRaiseTo, Math.round(v)));
     const out = [];
 
+    // ⚠️ 比例档**不夹**到合法范围,超出范围的直接不给。
+    //    以前是先夹再去重:翻前有人加到 60(最小加注到 100)时 2BB~4BB 全被夹成 100,
+    //    去重后只剩一个写着「2BB」的按钮,实际却是加注到 100;
+    //    筹码不够时唯一剩下的「2BB」实际是全下 —— 标签和金额对不上。
     if (preflop) {
-      // 翻前:以「加注到多少个大盲」为准
-      for (const n of [2, 2.5, 3, 4]) {
-        out.push({ key: `bb${n}`, label: `${n}BB`, value: clamp(bb * n) });
+      // 翻前:以「加注到多少个大盲」为准。
+      // 前面已经有人加注时,按「当前注的倍数」(2.5x / 3x / 4x)给 —— 固定的 2BB~4BB
+      // 那时都低于最小加注额,一个都用不上。标签统一写成换算后的真实 BB 数。
+      const raised = currentBet > bb;
+      const mults = raised ? [2.5, 3, 4] : [2, 2.5, 3, 4];
+      const base = raised ? currentBet : bb;
+      for (const n of mults) {
+        const v = Math.round(base * n);
+        const inBB = Math.round((v / bb) * 10) / 10;
+        out.push({ key: `bb${n}`, label: `${inBB}BB`, value: v });
       }
     } else {
       // 翻后:以底池比例为准。加注到 = 跟注额 + (底池 + 跟注额) × 比例
       const fracs = [[0.33, '1/3池'], [0.5, '半池'], [0.75, '3/4池'], [1, '满池']];
       for (const [f, label] of fracs) {
-        out.push({ key: `pot${f}`, label, value: clamp(cur.betThisRound + toCall + (pot + toCall) * f) });
+        out.push({ key: `pot${f}`, label, value: Math.round(cur.betThisRound + toCall + (pot + toCall) * f) });
       }
     }
-    out.push({ key: 'min', label: '最小', value: minRaiseTo });
-    out.push({ key: 'allin', label: '全下', value: maxRaiseTo });
-    void currentBet;
 
-    // 去重(不同尺度可能算出同一个值),并去掉超出范围的
-    const seen = new Set();
-    return out.filter((o) => {
-      if (o.value < minRaiseTo || o.value > maxRaiseTo) return false;
+    // 「最小」「全下」优先占位:比例档算出来跟它们同值时,留语义更明确的那个
+    const seen = new Set([minRaiseTo, maxRaiseTo]);
+    const ratios = out.filter((o) => {
+      if (o.value <= minRaiseTo || o.value >= maxRaiseTo) return false;
       if (seen.has(o.value)) return false;
       seen.add(o.value);
       return true;
     });
+    const tail = [{ key: 'min', label: '最小', value: minRaiseTo }];
+    if (maxRaiseTo > minRaiseTo) tail.push({ key: 'allin', label: '全下', value: maxRaiseTo });
+    else tail[0] = { key: 'allin', label: '全下', value: maxRaiseTo };   // 只够全下
+    return [...ratios, ...tail];
   }
 
   function renderSizes() {
@@ -272,7 +283,10 @@ export function createPlayerBar(root, { onAct, onReview, onOpenChange } = {}) {
 
     if (cur.canRaise) {
       renderSizes();
-      setAmount(Number(q('pbAmount').value) || cur.minRaiseTo);
+      // 正在往金额框里打字时别改写它(界面刷新会走到这里)
+      if (document.activeElement !== q('pbAmount')) {
+        setAmount(Number(q('pbAmount').value) || cur.minRaiseTo);
+      }
       if (raiseOpen) q('pbRaiseRow').hidden = false;
     } else {
       q('pbRaiseRow').hidden = true;
@@ -313,15 +327,32 @@ export function createPlayerBar(root, { onAct, onReview, onOpenChange } = {}) {
     q('pbRaiseRow').hidden = true;
     el.classList.remove('is-expanded');
   });
-  q('pbConfirm').addEventListener('click', () => {
-    act({ type: 'raise', amount: Number(q('pbAmount').value) });
-  });
+  q('pbConfirm').addEventListener('click', () => confirmRaise());
   q('pbSlider').addEventListener('input', () => {
     if (!cur) return;
     const span = cur.maxRaiseTo - cur.minRaiseTo;
     setAmount(cur.minRaiseTo + Math.round((Number(q('pbSlider').value) / 100) * span));
   });
-  q('pbAmount').addEventListener('input', () => setAmount(Number(q('pbAmount').value)));
+  // 输入时**不要**改写输入框:最小加注 40、想输 150 时,敲下「1」就会被夹成 40,
+  // 再敲「5」变成 405 —— 根本输不进去。输入过程中只同步滑杆和提示,
+  // 离开输入框(change)或确认时才夹到合法范围。
+  q('pbAmount').addEventListener('input', () => {
+    if (!cur) return;
+    const n = Number(q('pbAmount').value);
+    if (!Number.isFinite(n) || q('pbAmount').value === '') return;
+    const span = Math.max(1, cur.maxRaiseTo - cur.minRaiseTo);
+    const k = Math.max(0, Math.min(1, (n - cur.minRaiseTo) / span));
+    q('pbSlider').value = String(Math.round(k * 100));
+    updateWarn(Math.max(cur.minRaiseTo, Math.min(cur.maxRaiseTo, Math.round(n))));
+  });
+  q('pbAmount').addEventListener('change', () => setAmount(Number(q('pbAmount').value)));
+
+  /** 确认加注:先把输入框里的数夹到合法范围(界面上也同步显示),再交出去 */
+  function confirmRaise() {
+    if (!cur) return;
+    setAmount(Number(q('pbAmount').value));
+    act({ type: 'raise', amount: Number(q('pbAmount').value) });
+  }
   // (原来这里绑 pbReview —— 那个按钮已经移到手牌一览的公共牌行,由 sceneFull 负责)
 
   function act(action) {
@@ -338,7 +369,14 @@ export function createPlayerBar(root, { onAct, onReview, onOpenChange } = {}) {
   /** 轮到我时用键盘快捷键:F 弃牌 / C 过牌或跟注 / R 加注 / 回车确认 */
   function onKey(e) {
     if (!el.classList.contains('is-my-turn') || el.classList.contains('is-busy')) return;
-    if (e.target.tagName === 'INPUT') return;
+    // 正在输入 / 选下拉框时不抢键(在「模型」面板的下拉框里按 F、C 跳选项会直接弃牌跟注);
+    // 加注金额框例外:那里按回车就是确认
+    const tag = e.target?.tagName;
+    const inAmount = e.target?.id === 'pbAmount';
+    if ((tag === 'INPUT' && !inAmount) || tag === 'SELECT' || tag === 'TEXTAREA' || e.target?.isContentEditable) return;
+    if (inAmount && e.key !== 'Enter') return;
+    // 有面板盖在牌桌上时也不响应
+    if (document.querySelector('.setup.is-open, .confirm')) return;
     const k = e.key.toLowerCase();
     if (k === 'f') act({ type: 'fold' });
     else if (k === 'c') act({ type: cur?.canCheck ? 'check' : 'call' });
@@ -347,7 +385,7 @@ export function createPlayerBar(root, { onAct, onReview, onOpenChange } = {}) {
       q('pbRaiseRow').hidden = false;
       el.classList.add('is-expanded');
       setAmount(Number(q('pbAmount').value) || cur.minRaiseTo);
-    } else if (k === 'enter' && raiseOpen) act({ type: 'raise', amount: Number(q('pbAmount').value) });
+    } else if (k === 'enter' && raiseOpen) confirmRaise();
     else return;
     e.preventDefault();
   }

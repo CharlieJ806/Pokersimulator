@@ -22,19 +22,40 @@ const DEFAULT_CONFIG = {
   seatPersonas: {},         // { '0': 'nit', '1': 'maniac' }
   // ── 自定义中转站(OpenAI 兼容)─────────────────────────────
   // 中转站的特点:**一个地址 + 多个 Key**,每个 Key 能调的模型不一定相同。
-  customEndpoint: '',       // 完整地址,例如 https://中转站/v1/chat/completions
-  customKeys: [],           // [{ id: 'k1', label: 'Key 1', key: 'sk-...' }]
+  customEndpoint: '',       // 地址,填到 /v1 为止或完整路径都行(按协议自动补尾巴)
+  // protocol:'openai' | 'anthropic' | 'responses' | 'gemini' —— **协议跟着令牌分组走**,
+  // 所以必须逐 Key 配置,不能全局一个。PackyAPI 的模型卡片上有协议标签:
+  // ANTHROPIC / OPENAI-RESPONSE / OPENAI / GOOGLE(Gemini 原生格式),
+  // 见 shared/llmStream.mjs 的 RELAY_PROTOCOLS。
+  // gemini 那条地址填到域名或 /v1 都行,路径由 geminiUrl() 自己拼。
+  customKeys: [],           // [{ id: 'k1', label: 'Key 1', key: 'sk-...', protocol: 'openai' }]
   seatCustomKeys: {},       // { '0': 'k1' } 座位用哪个 Key;不填 = 第一个
   endpoint: 'https://api.deepseek.com/chat/completions',
   apiKey: '',
-  model: 'deepseek-chat',
+  model: 'deepseek-flash',     // 与 providers.mjs 里 deepseek 的 defaultModel 一致
   temperature: 1.1,
   // 推理型模型(deepseek-flash / deepseek-v4-pro / qwen3-thinking 等)会先输出
   // 一大段 reasoning_content 再给正式回答,两者共用同一个 max_tokens 预算。
   // 实测 deepseek-flash:max_tokens=300 时推理就吃了 940 字,正式回答被挤掉
   // (finish_reason=length),决策只能从残缺文本硬猜;600 以上才够。
   // 所以默认给足,不然「思考」会挤掉「决策」。
-  maxTokens: 1200,
+  // 提到 2000:推理已压到最低档(reasoningLevel:'low' —— openai 协议发
+  // reasoning_effort:'low'、Gemini 发 thinkingBudget:512),额度基本都留给正文,
+  // 再留足冗余,避免「没有可识别的动作」那种截断。
+  maxTokens: 2000,
+  // 推理档位(四家协议统一,字段映射见 shared/llmStream.mjs 的 REASONING_LEVELS):
+  //   'off'     完全关闭(Gemini thinkingBudget:0 / 不 Anthropic thinking / 不发 reasoning_effort)
+  //   'low'     **默认**:保留推理但压到各家允许的最低档 —— 关掉推理在难题上会降智,
+  //             而牌桌只需要它「别啰嗦」
+  //   'default' 什么都不发,走厂商默认
+  // ⚠️ 这就是用户实测「等了 78 秒 → 请求超时」的对策之一:默认档会让推理型模型长考,
+  //    而推理 token 和正式回答共用额度,长考的另一个后果是正式 JSON 被截断。
+  reasoningLevel: 'low',
+  // 单次模型调用的超时。45s:一张桌子是**轮流**调用模型的,一个人卡 90 秒,
+  // 整桌就停等一分半 —— 实测那比「偶尔退回本地策略」难忍得多。
+  // 推理已经压到最低档之后,45s 足够推理型模型想完(实测 low 档推理均长几百字)。
+  // ⚠️ 这个值以前是**死字段**:app.js 的 agentCfg 从来没把它传给 agent,
+  //    调用层一直只用它自己的 45s 缺省。现已接通。
   timeoutMs: 45000,
   game: {
     seats: 6,
@@ -52,6 +73,13 @@ const DEFAULT_CONFIG = {
     deckView: 'down',        // down = 全部盖着(默认) | board = 只看公共牌 | up = 全翻开(荷官特权)
   },
 };
+
+/** 至少配了一个可用的 Key(含自定义中转站的 customKeys) */
+function hasAnyKey(cfg) {
+  if (cfg.apiKey) return true;
+  if (Object.values(cfg.keys || {}).some((k) => k && String(k).trim())) return true;
+  return !!cfg.customEndpoint && (cfg.customKeys || []).some((k) => k?.key && String(k.key).trim());
+}
 
 /**
  * 深合并配置补丁。
@@ -110,7 +138,7 @@ function registerIpc(configPath) {
     return {
       ...cfg,
       configPath,
-      hasKey: !!cfg.apiKey || Object.values(cfg.keys || {}).some((k) => k && k.trim()),
+      hasKey: hasAnyKey(cfg),
       providerList: providerList(),
     };
   });
@@ -118,7 +146,7 @@ function registerIpc(configPath) {
   handle('config:set', (_e, patch) => {
     const cfg = deepMerge(store.read(), patch || {});
     const res = store.write(cfg);
-    return { ...res, config: cfg, hasKey: !!cfg.apiKey || Object.values(cfg.keys || {}).some((k) => k && k.trim()) };
+    return { ...res, config: cfg, hasKey: hasAnyKey(cfg) };
   });
 
   handle('config:clearKey', () => {
@@ -160,6 +188,12 @@ function registerIpc(configPath) {
     const timer = setTimeout(() => controller.abort(), spec.timeoutMs || 45000);
 
     let chunkCount = 0;
+    // 流里报出来的错误(共享解析器在 finish 事件上带出来的 error 字段)。
+    // ⚠️ 以前这里**直接忽略**了 finish 通道,于是「HTTP 200 + 流里 response.failed」
+    //    被当成一次成功、text 为空 —— 调用方只能看到「模型没给出可识别动作」这种
+    //    误导性的结论,真正的死因(上游渠道不可用 / 额度不足)一个字都没露出来。
+    //    连通性测试按钮的全部价值就是把这种话原样交给用户,所以必须接住。
+    let streamError = '';
     // 累积到这里的正文,一并回推给渲染层方便它显示「已收到的完整文本」
     let fullForEmit = '';
     const emit = (delta, thinking = false) => {
@@ -196,6 +230,7 @@ function registerIpc(configPath) {
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
         buffer = await consumeSseBuffer(buffer, kind, (c) => {
+          if (c.error) { streamError = String(c.error); return; }
           if (c.phase === 'reasoning') {
             reasoning += c.reasoning;
             // 推理增量也要推给界面 —— 否则整个思考阶段是空白的
@@ -215,6 +250,8 @@ function registerIpc(configPath) {
           }
         });
       }
+      // 流里报错要当失败(原文带上),不能返回一个「成功的空文本」
+      if (streamError) return { ok: false, status: 200, error: `上游流里报错:${streamError}`, chunks: chunkCount };
       return { ok: true, status: 200, text: full || reasoning, reasoning, chunks: chunkCount };
     } catch (err) {
       const aborted = err?.name === 'AbortError';

@@ -14,7 +14,7 @@
 座位上的 2D 立绘取自开源项目 **CrossPet**:
 
 - 仓库:<https://github.com/lokicorvus/crosspet>(目录 `characters/`)
-- 取用范围:6 个角色 × 5 个状态(idle / thinking / happy / oops / surprised),共 30 张
+- 取用范围:5 个角色 × 5 个状态(idle / thinking / happy / oops / surprised),共 25 张
 - 取图流程:`tools/fetchportraits.mjs`
 - 本地完整说明:`assets/portraits/SOURCES.md`、`assets/portraits/LICENSE.md`(原许可原文)
 

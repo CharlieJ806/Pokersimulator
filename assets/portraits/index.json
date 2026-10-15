@@ -78,44 +78,6 @@
         }
       }
     },
-    "deepseek-hoodie": {
-      "id": "deepseek-hoodie",
-      "name": "DeepSeek",
-      "accent": "#e8a33d",
-      "greeting": "好的，我现在是 Claude！",
-      "states": {
-        "idle": {
-          "file": "idle.webp",
-          "from": "idle.webp",
-          "w": 606,
-          "h": 640
-        },
-        "thinking": {
-          "file": "thinking.webp",
-          "from": "thinking.webp",
-          "w": 578,
-          "h": 640
-        },
-        "happy": {
-          "file": "happy.webp",
-          "from": "happy.webp",
-          "w": 593,
-          "h": 640
-        },
-        "oops": {
-          "file": "oops.webp",
-          "from": "oops.webp",
-          "w": 580,
-          "h": 640
-        },
-        "surprised": {
-          "file": "surprised.webp",
-          "from": "surprised.webp",
-          "w": 562,
-          "h": 640
-        }
-      }
-    },
     "gemini": {
       "id": "gemini",
       "name": "Gemini",

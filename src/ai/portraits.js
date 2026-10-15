@@ -6,7 +6,7 @@
  *   · 同一个模型被多个座位用到时,用不同 accent 色调 + 保留性格名来区分;
  *   · 认不出来的模型先用通用占位立绘。
  *
- * 素材只有 6 套(claude / deepseek / deepseek-hoodie / gemini / glm / gpt),
+ * crosspet 那批 5 套(claude / deepseek / gemini / glm / gpt)+ 手工加的 qwen / grok / kimi / mimo,
  * 而应用支持 10 家厂商、每家又有任意多个模型,所以这里必须做**两层猜测**:
  *   1. 先看模型名里的关键词(最准:同一个厂商下可能挂着别家的模型,比如
  *      OpenRouter / 硅基流动 / Ollama 上什么都可能有);
@@ -18,9 +18,9 @@
 
 /** 有立绘的角色 id(与 assets/portraits/ 下的目录名一致) */
 export const PORTRAIT_CHARS = [
-  'claude', 'deepseek', 'deepseek-hoodie', 'gemini', 'glm', 'gpt',
-  // 手工加进来的两套:每个只有一张 idle,缺的状态自动复用(见 portraits2d.js)
-  'qwen', 'grok',
+  'claude', 'deepseek', 'gemini', 'glm', 'gpt',
+  // 手工加进来的:每个只有一张 idle,缺的状态自动复用(见 portraits2d.js)
+  'qwen', 'grok', 'kimi', 'mimo',
 ];
 
 /** 没有对应立绘时用的占位角色 */
@@ -47,6 +47,10 @@ const MODEL_RULES = [
   { char: 'gpt', subs: ['gpt', 'chatgpt', 'codex', 'davinci'], toks: ['o1', 'o3', 'o4'] },
   { char: 'qwen', subs: ['qwen', 'tongyi', 'qianwen'], toks: [] },
   { char: 'grok', subs: ['grok', 'xai'], toks: [] },
+  // Kimi(月之暗面):型号有 kimi-k2 / moonshot-v1-* 两种写法
+  { char: 'kimi', subs: ['kimi', 'moonshot'], toks: [] },
+  // 小米 MiMo:'mimo' 这串很短,按整词匹配,免得误伤带 mimo 字母的别家型号
+  { char: 'mimo', subs: ['xiaomi'], toks: ['mimo'] },
 ];
 
 /** 厂商 id → 角色(模型名没给出线索时的兜底)。
@@ -131,12 +135,13 @@ export function assignAccents(entries) {
 export const CHAR_LABEL = {
   claude: 'Claude',
   deepseek: 'DeepSeek',
-  'deepseek-hoodie': 'DeepSeek',
   gemini: 'Gemini',
   glm: 'GLM',
   gpt: 'GPT',
   qwen: 'Qwen',
   grok: 'Grok',
+  kimi: 'Kimi',
+  mimo: 'MiMo',
   generic: '未知模型',
 };
 

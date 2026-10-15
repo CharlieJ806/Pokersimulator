@@ -109,19 +109,21 @@
 | `.modecard` / `.home__modes` | 主页模式卡片 |
 | `.rvrow` / `.rvcard` / `.rvthink` | 回顾面板 |
 
-**配色改这里**(文件顶部):
+**配色改这里**(文件顶部)。整体是明亮的画廊风格:暖白纸底 + 磨砂面板 + 墨色主按钮 + 黄铜点缀。
 
 ```css
 :root {
-  --gold: #e9c46a;        /* 主强调色 */
-  --bg: #141b22;          /* 背景 */
-  --line: ...;            /* 边框 */
-  --text: ...;            /* 正文 */
-  --text-dim: ...;        /* 次要文字 */
+  --bg: #f3eee6;          /* 页面底色 */
+  --paper / --panel;      /* 实色卡片 / 磨砂面板 */
+  --ink: #2a251f;         /* 主按钮、开关 */
+  --gold: #9c7636;        /* 点缀色(标题、强调数字) */
+  --line / --line-2;      /* 边框 */
+  --text / --text-dim;    /* 正文 / 次要文字 */
 }
 ```
 
-3D 场景的配色在 `src/ui3d/scene.js` 的 `PALETTE`。
+3D 场景的配色在 `src/ui3d/scene.js` 的 `PALETTE`;**后墙挂画**的尺寸、高度、画框在同文件的 `PAINTING`。
+换画:把新图放进 `assets/Background/`,跑 `node_modules/.bin/electron tools/prepdecor.mjs` 生成 `assets/decor/painting.jpg`(主页头图用的也是它)。
 
 ---
 

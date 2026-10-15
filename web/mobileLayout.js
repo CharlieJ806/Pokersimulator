@@ -117,7 +117,9 @@ export function installPlayerBarAnchor() {
 
   // 手牌一览的展开/收起也要重新对齐
   const btn = document.getElementById('btnHandStrip');
-  btn?.addEventListener('click', () => setTimeout(syncPlayerBarAnchor, 60));
+  // 具名函数:卸载时要能摘掉(以前绑的是匿名函数,卸载时摘的却是 onResize,永远摘不掉)
+  const onStripToggle = () => setTimeout(syncPlayerBarAnchor, 60);
+  btn?.addEventListener('click', onStripToggle);
 
   syncPlayerBarAnchor();
   // 首次布局可能还没稳定,补一帧
@@ -127,7 +129,7 @@ export function installPlayerBarAnchor() {
     ro?.disconnect();
     window.removeEventListener('resize', onResize);
     window.removeEventListener('orientationchange', onResize);
-    btn?.removeEventListener('click', onResize);
+    btn?.removeEventListener('click', onStripToggle);
     document.documentElement.style.removeProperty('--pbar-bottom');
   };
 }
@@ -163,12 +165,26 @@ export function installMobileLayout(table) {
     syncPlayerBarAnchor();
   });
 
+  // 竖屏手机:能玩,但牌桌只有屏幕中间一小块。进牌桌时提示一次横屏
+  // (只在真正进入牌桌后提示,主页 / 设置页竖着看没问题)
+  let rotateHinted = false;
+  const maybeHintRotate = () => {
+    if (rotateHinted || !window.__poker?.engine) return;
+    if (window.innerWidth < window.innerHeight && window.innerWidth <= 640) {
+      rotateHinted = true;
+      clearInterval(hintTimer);
+      table.toast?.('横过来玩更舒服:牌桌和按钮都会大一些', 'info', 4200);
+    }
+  };
+  const hintTimer = setInterval(maybeHintRotate, 1500);
+
   return () => {
     window.removeEventListener('resize', onResize);
     window.removeEventListener('orientationchange', onResize);
     btnLog?.removeEventListener('click', markTouched);
     btnStrip?.removeEventListener('click', markTouched);
     clearTimeout(installMobileLayout._t);
+    clearInterval(hintTimer);
     uninstallAnchor();
   };
 }

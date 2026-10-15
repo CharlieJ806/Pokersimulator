@@ -32,6 +32,9 @@ import { createModelsPanel } from './models.js';
 import { FlowController, MODE_INFO } from './flow.js';
 import { assignPersonas, PERSONAS } from '../ai/personas.js';
 import { PokerAgent } from '../ai/agent.js';
+// 协议 → kind 的唯一映射(和请求构造、SSE 解析放在同一份共享模块里,
+// 免得界面上选的值和底层认的值对不上)
+import { kindForProtocol, normalizeReasoningLevel } from '../shared/llmStream.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, Math.max(0, ms)));
 
@@ -233,6 +236,9 @@ export class GameApp {
       mode: 'lobby',
       onSaveAI: (patch) => this.saveConfig(patch),
       onStart: (values, opts) => this.startGame(values, opts),
+      // 还没开局:回主页就是把「进入玩家模式」时改过的界面状态撤回去(exitToHome 全包了)
+      onBack: () => this.exitToHome(),
+      onModels: (seats) => this.openModelsPanel(seats),
     });
 
     // 中途改规则(抽屉)
@@ -244,14 +250,25 @@ export class GameApp {
       onSaveAI: (patch) => this.saveConfig(patch),
       onStart: (values) => this.applyGameSettings(values),
       onExitHome: () => this.exitToHome(),
+      onModels: () => this.openModelsPanel(),
     });
 
     // 按座位分配模型
     const modelsRoot = document.createElement('div');
-    modelsRoot.className = 'drawerRoot';
+    // --top:模型面板要能盖在**主页和设置页之上**打开。
+    // 以前它和主页同一层级、DOM 又在主页前面 —— 从主页点「模型与 API Key」时面板其实打开了,
+    // 只是被主页整个挡在下面,看起来就是按钮没反应。
+    modelsRoot.className = 'drawerRoot drawerRoot--top';
     this.root.appendChild(modelsRoot);
     this.modelsPanel = createModelsPanel(modelsRoot, {
       onSave: (patch) => this.saveModelAssignment(patch),
+      /**
+       * 「测试」按钮的座位配置由这里组装 —— 面板把**此刻 DOM 上的**配置快照
+       * (含还没保存的改动)交回来,走的是和真实调用同一个 agentCfg。
+       * 不在面板里重写一份「座位该用哪个厂商/Key/模型」的规则(见 agentCfg 的注释)。
+       * localOnly:false —— 测试是排查配置用的,不该因为当前是本地策略模式就被禁掉。
+       */
+      testSpec: (cfg, seat) => this.agentCfg(seat, cfg, { localOnly: false }),
     });
 
     // 预填上次的设置
@@ -302,6 +319,8 @@ export class GameApp {
           this.setup.show();
         }
       },
+      // 开局前也能配模型 —— 补上「只能开局后配、配了又不生效」那个逻辑漏洞
+      onModels: () => this.openModelsPanel(),
     });
     this.home.show();
   }
@@ -318,7 +337,7 @@ export class GameApp {
     this.setup.setPlayerMode?.(true);
     this.drawer.setPlayerMode?.(true);
     this.setup.show();
-    this.table.toast('玩家模式:设置好之后开始,轮到你会出现下注操作条', 'ok', 4200);
+    // (不再弹 toast:设置页标题下已经写了玩家模式的说明,toast 只会压在卡片上)
   }
 
   /**
@@ -328,9 +347,9 @@ export class GameApp {
    * 手法跟「中途改规则重开」一致 —— bump generation,让旧的循环自己退出。
    */
   exitToHome() {
-    this.generation += 1;                   // 旧循环看到这个就会中止
-    this.abort?.abort();
-    this.abort = new AbortController();
+    // bump generation + 掐断请求 + 解开节奏控制器的等待(旧循环看到这些就会中止)
+    this.cancelRun();
+    this.hideConfirm();
     if (this.myActionResolve) {
       // 正在等我下注:先把这个 Promise 解掉,否则 playHandLoop 会一直挂着
       const r = this.myActionResolve;
@@ -347,6 +366,7 @@ export class GameApp {
     this.handThoughts = [];
     this.actionSeat = null;              // 动作气泡(思考结束后显示「做了什么」)
     this.actionText = '';
+    this.actionSay = '';                 // 模型主动说出口的那句话(玩家模式给玩家看的)
     this.actionUntil = 0;
     this.pendingGameSettings = null;
     this.forceRestart = false;
@@ -380,10 +400,15 @@ export class GameApp {
   /** 是否至少配了一家厂商的 Key(本地模型算已配置) */
   hasAnyKey() {
     const c = this.cfg || {};
-    const list = c.providerList || [];
-    if (list.some((p) => p.noKey)) return true;
     if (c.apiKey) return true;
-    return Object.values(c.keys || {}).some((k) => k && k.trim());
+    if (Object.values(c.keys || {}).some((k) => k && String(k).trim())) return true;
+    // 自定义中转站:地址 + 至少一个填了密钥的 Key
+    if (c.customEndpoint && (c.customKeys || []).some((k) => k?.key)) return true;
+    // 本地模型不需要 Key —— 但只有**默认厂商就是它**时才算配好了。
+    // 以前写成「列表里有任何免 Key 的厂商」:Ollama 永远在列表里,这个判断恒为真,
+    // 「本地策略模式」的提示永远不出现,没填 Key 时输入框还显示「已保存」。
+    const def = (c.providerList || []).find((p) => p.id === c.defaultProvider);
+    return !!def?.noKey;
   }
 
   /**
@@ -415,6 +440,35 @@ export class GameApp {
     return { hasKey: !!this.cfg?.hasKey };
   }
 
+  /**
+   * 打开「按座位分配模型」面板 —— 开局**之前**也能开。
+   *
+   * 为什么单独抽出来:以前入口只在游戏里的顶栏,于是必须先随便开一局、
+   * 再进去改模型,而那时候名字和立绘早就按默认模型建好了。
+   * 用户看到的就是「只能在开局后配,配了又不生效」这个逻辑漏洞。
+   */
+  openModelsPanel(seatsHint) {
+    const seats = this.engine?.state?.players?.length || seatsHint || this.cfg?.game?.seats || 6;
+    // 开局前人数可能变了(设置页滑杆刚拖过):预览用的性格表要按新人数重建
+    if (!this.engine && this.personaMap.size !== seats) this.personaMap.clear();
+    // 开局前没有牌局,personaMap 是空的 —— 面板里只会显示「座位 1/2/3…」,
+    // 用户不知道自己正在给谁配模型。所以这里补一份**预览用**的性格表。
+    // 只影响面板的显示;真正开局时 buildEngine 会重新分配,不会被这份污染。
+    if (!this.personaMap.size) {
+      const wanted = this.cfg?.seatPersonas || {};
+      for (let seat = 0; seat < seats; seat++) {
+        const p = (wanted[seat] && PERSONA_MAP?.[wanted[seat]]) || PERSONAS[seat % PERSONAS.length];
+        if (p) this.personaMap.set(seat, p);
+      }
+    }
+    // 第三个参数是座位显示名(模型名),面板用它展示「这个名字是谁」
+    // 先 fill 再 setSeats:fill 会用配置里**上次保存的**人数覆盖座位数,
+    // 顺序反了的话,设置页刚把滑杆拖到 8 人,面板里却还是 6 行
+    this.modelsPanel.fill(this.cfg);
+    this.modelsPanel.setSeats(seats, this.personaMap, this.seatNames);
+    this.modelsPanel.show();
+  }
+
   /** 保存「按座位分配模型」的结果 */
   async saveModelAssignment(patch) {
     const res = await window.pokerAPI.setConfig(patch);
@@ -428,6 +482,9 @@ export class GameApp {
         this.table.applyPortraits?.();
         this.render();
       }
+      // 设置页 / 抽屉里的「默认厂商 / 模型」两格跟着改,否则开局时会被它们的旧值写回去
+      this.setup?.syncAI?.(this.cfg);
+      this.drawer?.syncAI?.(this.cfg);
       this.syncTopbar();
       this.render();
       this.table.toast(`模型已更新:${this.llmSummary()}`, 'ok', 3200);
@@ -485,15 +542,27 @@ export class GameApp {
     return arr.length <= 2 ? arr.join(' + ') : `${arr.length} 种模型`;
   }
 
-  /** 这个座位该用哪家/哪个模型 */
-  resolveSeatLLM(seat) {
-    if (this.localOnly) return { providerId: 'local', model: '' };
-    const c = this.cfg || {};
+  /** 这个座位该用哪家/哪个模型
+   *
+   * cfg / localOnly 两个参数是给「连通性测试」用的:面板上有**还没保存**的改动时,
+   * 测试必须按面板里此刻填的东西去测,而不是按上次保存的配置 ——
+   * 否则用户改了模型名再点测试,测出来的是旧配置的结论,纯属误导。
+   * 所以测试时把面板快照当 cfg 传进来,复用同一个函数,规则不存在第二份。
+   */
+  resolveSeatLLM(seat, cfg = this.cfg, localOnly = this.localOnly) {
+    if (localOnly) return { providerId: 'local', model: '' };
+    const c = cfg || {};
     const pid = c.seatProviders?.[seat] || c.defaultProvider || 'deepseek';
     if (pid === 'local') return { providerId: 'local', model: '' };
     const list = c.providerList || [];
     const p = list.find((x) => x.id === pid);
-    const model = c.seatModels?.[seat] || (seat === 0 ? c.model : '') || p?.defaultModel || '';
+    // 「默认模型」(c.model)对所有**跟随默认厂商**的座位生效。
+    // 以前写成 seat === 0 才用它:1 号以后的座位全拿不到(中转站这种没有 defaultModel 的
+    // 厂商就会发空模型名、被拒、退回本地策略);玩家模式 0 号是人,等于没有任何 AI 用到它。
+    // 反过来,0 号单独换了厂商时也不能套用别家的默认模型名。
+    const own = c.seatProviders?.[seat];
+    const followsDefault = !own || own === c.defaultProvider;
+    const model = c.seatModels?.[seat] || (followsDefault ? c.model : '') || p?.defaultModel || '';
     return { providerId: pid, model };
   }
 
@@ -504,43 +573,102 @@ export class GameApp {
    * 所以座位要先选 Key(seatCustomKeys),再填模型名(seatModels)。
    * 没选就用第一个 Key。
    */
-  customKeyFor(seat) {
-    const list = this.cfg?.customKeys || [];
-    const wanted = this.cfg?.seatCustomKeys?.[seat];
+  customKeyFor(seat, cfg = this.cfg) {
+    const list = cfg?.customKeys || [];
+    const wanted = cfg?.seatCustomKeys?.[seat];
     return list.find((k) => k.id === wanted) || list[0] || null;
   }
 
-  agentCfg(seat) {
-    const { providerId, model } = this.resolveSeatLLM(seat);
-    const keys = this.localOnly ? {} : (this.cfg?.keys || {});
-    const list = this.cfg?.providerList || [];
+  /**
+   * 组装某个座位真正用于调用模型的配置。
+   *
+   * ⚠️ 「模型分配」面板的连通性测试按钮**直接调这个函数**(见 createModelsPanel 的
+   *    testSpec 回调)。为什么不让面板自己算一遍:座位该用哪个厂商、模型名怎么跟随默认、
+   *    中转站没选 Key 时用哪个、协议怎么变成 kind —— 这一串规则只要写第二份,
+   *    迟早和这里漂移,而「两条路径各写一份」在这个仓库已经出过两次事故
+   *    (一次是参数降级只加在测试路径上,一次是截断重试只加在测试路径上)。
+   *
+   * @param {number} seat
+   * @param {object} [cfg] 配置快照(默认 this.cfg;连通性测试传面板里此刻的 DOM 值)
+   * @param {{localOnly?:boolean}} [opts] 测试时传 localOnly:false ——
+   *   「全部改用本地策略」不该让测试按钮变得不可用,那正是用户要排查配置的时候。
+   */
+  agentCfg(seat, cfg = this.cfg, opts = {}) {
+    const localOnly = opts.localOnly ?? this.localOnly;
+    const { providerId, model } = this.resolveSeatLLM(seat, cfg, localOnly);
+    const keys = localOnly ? {} : (cfg?.keys || {});
+    const list = cfg?.providerList || [];
     const p = list.find((x) => x.id === providerId);
 
-    // 自定义中转站:地址来自配置(全局一个),Key 来自该座位选的那个
+    // 自定义中转站:地址来自配置(全局一个),Key 与**协议**来自该座位选的那个 Key。
+    //
+    // 协议为什么挂在 Key 上:中转站的「令牌分组」决定了这个 Key 能调哪些模型,
+    // 而分组和协议是绑定的 —— CC 分组的 Claude 只挂 ANTHROPIC 标签,
+    // Kimi-sale 的 kimi-k3 只挂 OPENAI-RESPONSE 标签。同一个中转站里
+    // 不同分组的 Key 就是不同协议,写死成 openai 会让这些模型全部
+    // 报 protocol_not_supported(实测)。
     if (providerId === 'custom') {
-      const endpoint = String(this.cfg?.customEndpoint || '').trim();
-      const ck = this.customKeyFor(seat);
+      const endpoint = String(cfg?.customEndpoint || '').trim();
+      const ck = this.customKeyFor(seat, cfg);
       const key = String(ck?.key || '').trim();
       return {
         providerId,
         provider: p,
         model,
         apiKey: key,
-        enabled: !!endpoint && !!key && !this.localOnly,
+        noKey: false,
+        enabled: !!endpoint && !!key && !localOnly,
         endpoint,
-        kind: 'openai',
+        kind: kindForProtocol(ck?.protocol),
+        /**
+         * 推理档位 —— 压到最低但**不关**(用户在界面上选,默认 low)。
+         *
+         * 为什么不是「关掉推理」:
+         *   关掉之后难题上模型会降智 —— 它连草稿都不打就得直接给结论。
+         *   牌桌要的从来不是「不要思考」,而是「别啰嗦」,所以默认最低档:
+         *   OpenAI 兼容口发 reasoning_effort:'low',Gemini / Anthropic / Responses
+         *   各自的字段(budget_tokens / reasoning.effort / thinkingBudget)由
+         *   buildRequest 按协议统一发 —— 这里**只传档位**。
+         *
+         * ⚠️ 以前这里是硬编码的 `requestExtra:{reasoning_effort:'low'}`,
+         *    而且只对 openai 协议发:
+         *      · Anthropic 用 thinking、Responses 用 reasoning.effort,
+         *        字段名和嵌套层级都不一样,在这里各写一份 = 迟早漂移;
+         *      · 更要命的是它**绕过了档位开关** —— 用户选「关闭」也照样发出去,
+         *        那这个开关就是骗人的。所以字段全部交给 buildRequest 一处决定。
+         *    Node 直连那条路(agent.js 的 callLLMDirect)也读同一个字段,
+         *    两条路径的报文因此逐字一致。
+         *
+         * ⚠️ 只在中转站这条路上把档位交下去:
+         *    内置厂商的容忍度是逐家实测定过的(deepseek 有 provider.requestExtra,
+         *    别的家不认这个字段的直接 400),一刀切地给所有 openai 兼容厂商加
+         *    reasoning_effort 会把这些厂商全部打回降级重试。中转站后面挂的是什么
+         *    模型完全不确定,只能按统一档位发 —— 这也正是这个下拉在中转站区块里的原因。
+         *
+         * ⚠️ timeoutMs / maxTokens 也必须传下去。它们当年就是因为这里没传而变成
+         *    **死字段** —— 无论用户填多少,调用层都只用它自己的缺省值。
+         *    新加配置项时务必顺着这条链走一遍:界面 → collect → 配置 → agentCfg → agent。
+         */
+        reasoningLevel: normalizeReasoningLevel(cfg?.reasoningLevel),
+        timeoutMs: cfg?.timeoutMs,
+        maxTokens: cfg?.maxTokens,
       };
     }
 
-    const enabled = providerId !== 'local' && (!!p?.noKey || !!keys[providerId]) && !this.localOnly;
+    const enabled = providerId !== 'local' && (!!p?.noKey || !!keys[providerId]) && !localOnly;
     return {
       providerId,
       provider: p,
       model,
       apiKey: keys[providerId] || '',
+      // 本地模型(Ollama / LM Studio)不需要 Key —— 不带上这个标记,
+      // agent.decide() 看到 apiKey 为空就直接走本地策略,永远不会真的去调本地模型
+      noKey: !!p?.noKey,
       enabled,
       endpoint: p?.endpoint,
       kind: p?.kind || 'openai',
+      timeoutMs: cfg?.timeoutMs,
+      maxTokens: cfg?.maxTokens,
     };
   }
 
@@ -555,6 +683,7 @@ export class GameApp {
 
   async startGame(values, opts = {}) {
     this.localOnly = !!opts.forceLocal;
+    this._bustNoticed = false;
     this.mode = this.mode || 'dealer';
     this.applyFlowSettings(values.ui || {});
     this.gameSettings = { ...values.game };
@@ -775,6 +904,14 @@ export class GameApp {
     try { this.abort?.abort(); } catch { /* ignore */ }
     this.abort = new AbortController();
     this.flow.abort();
+    // 玩家模式正在等我下注:把那个 Promise 解掉(generation 已经变了,
+    // handler 会直接 resolve(false) 而不动引擎),否则旧的 playHandLoop 永远挂着
+    if (this.myActionResolve) {
+      const r = this.myActionResolve;
+      this.myActionResolve = null;
+      this.myTurnSeat = null;
+      try { r({ type: 'fold' }); } catch { /* 忽略 */ }
+    }
     this.busy = false;
   }
 
@@ -808,6 +945,7 @@ export class GameApp {
     // 动作气泡也清掉(上一手最后一个动作的残留,别带到新的一手)
     this.actionSeat = null;
     this.actionText = '';
+    this.actionSay = '';
     this.actionUntil = 0;
 
     const run = (async () => {
@@ -855,11 +993,13 @@ export class GameApp {
     let guard = 0;
     let softRetry = 0;              // 「状态刚好变了」这类时序问题允许重试,但要有上限
     let lastSignature = '';
-    while (!this.engine.state.handOver && guard++ < 400) {
-      if (gen !== this.generation) {
+    while (guard++ < 400) {
+      // 先查 generation 再碰 engine:退回主页时 engine 已经被置空
+      if (gen !== this.generation || !this.engine) {
         (this.debugErrors ||= []).push('牌局已重开,中止上一手的行动循环');
         return false;
       }
+      if (this.engine.state.handOver) break;
       const seat = this.engine.state.actor;
       if (seat === null) break;
 
@@ -915,7 +1055,7 @@ export class GameApp {
     this.render();
     this.table.setHint('');
     return new Promise((resolve) => {
-      this.myActionResolve = (action) => {
+      const handler = (action) => {
         this.myTurnSeat = null;
         this.myActionResolve = null;
         // 重新确认一次:等待期间牌局可能已经重开或结束
@@ -930,8 +1070,10 @@ export class GameApp {
         } catch (err) {
           (this.debugErrors ||= []).push(`玩家动作被拒 ${JSON.stringify(action)}: ${err.message}`);
           this.table.toast(`这个动作不合法(${err.message})`, 'warn', 2800);
-          // 不结束等待:让玩家重新选
+          // 不结束等待:让玩家重新选 —— 必须把 handler 挂回去,
+          // 上面已经把 myActionResolve 清空了,不挂回去之后点什么都没反应
           this.myTurnSeat = seat;
+          this.myActionResolve = handler;
           this.updatePlayerBar();
           this.render();
           return;
@@ -941,6 +1083,7 @@ export class GameApp {
         this.render();
         resolve(true);
       };
+      this.myActionResolve = handler;
     });
   }
 
@@ -1068,8 +1211,11 @@ export class GameApp {
     const st = this.engine.state;
     const handNo = st.handNo;
     if (!handNo) return;
-    if (this._noteInFlight >= 3) return;     // 上一批还没跑完,等下一手
     for (const [seat, agent] of this.agents) {
+      // 最多同时 3 个。必须在循环**里面**查:各 AI 写笔记的周期相同,
+      // 只在循环前查一次的话 9 人桌每到第 3 手会一口气发出 8 个请求。
+      // 这一手没轮上的会在下一手补上(shouldWriteNotes 看的是「距上次写过了几手」)。
+      if (this._noteInFlight >= 3) break;
       if (!agent.cfg?.enabled) continue;
       // 频率交给 agent 自己判断(它记着上次是第几手写的)
       if (!agent.shouldWriteNotes(handNo, this.notesEvery ?? 3)) continue;
@@ -1107,6 +1253,14 @@ export class GameApp {
     if (st.actor !== seat || st.handOver) {
       throw new Error(`轮次已变化(期望座位 ${st.actor},实际 ${seat})`);
     }
+    // 每个 await 之后都要确认「还是同一局、同一个引擎」。
+    // 只看闭包里的 st 不够:退出回主页 / 中途改规则会换掉 engine,
+    // 旧的 st 仍然显示「轮到我」,于是旧决策会被 act 到**新引擎**上
+    // (新一手第一个行动的人碰巧是同一个座位号时就直接生效了)。
+    const gen = this.generation;
+    const engine = this.engine;
+    const stale = () => gen !== this.generation || this.engine !== engine
+      || st.handOver || st.actor !== seat;
 
     const persona = this.personaMap.get(seat);
     this.thinkingSeat = seat;
@@ -1114,7 +1268,7 @@ export class GameApp {
     this.thinkingText = '';
     this.render();
     await this.flow.pauseBeforeAct();
-    if (st.handOver || st.actor !== seat) return;
+    if (stale()) return;
 
     // 让这个 AI 决策(它只看得到自己的牌)
     const view = this.engine.viewForSeat(seat);
@@ -1148,13 +1302,24 @@ export class GameApp {
         this.thinkingText = tidyThinking(streamed);
         this.renderSeatOnly(seat);
       },
-      onError: () => this.table.toast(`${agent.name} 的模型调用失败,已用本地策略`, 'warn', 3200),
+      // 把**真实原因**亮出来。以前只有一句「调用失败」,用户没法判断是 Key 错、
+      // 模型名错、还是参数不认 —— 中转站排错全靠猜。完整原因同时写进牌局记录,toast 只放前一截。
+      onError: (e = {}) => {
+        const msg = String(e.message || '未知错误').replace(/\s+/g, ' ');
+        const model = agent.cfg?.model ? `(${agent.cfg.model})` : '';
+        if (e.level === 'info') {
+          this.table.toast(`${agent.name}${model}:${msg}`, 'info', 3200);
+          return;
+        }
+        this.table.toast(`${agent.name}${model} 调用失败,本手先用本地策略:${msg.slice(0, 90)}`, 'warn', 5200);
+        this.table.pushLog({ kind: 'info', text: `⚠ ${agent.name}${model} 调用失败:${msg.slice(0, 300)}` });
+      },
     };
 
     const t0 = Date.now();
     const decision = await agent.decide(view, history, { signal: this.abort?.signal });
     const elapsed = Date.now() - t0;
-    if (st.handOver || st.actor !== seat) return;
+    if (stale()) return;
 
     // 模型给动作的同时也给了这段中文思考 —— 它才是要显示给玩家看的东西。
     // 优先用解析出来的 thinking 字段(最准),拿不到就退回流式过程中整理出的文本。
@@ -1173,13 +1338,13 @@ export class GameApp {
     this.thinkingSeat = seat;
     this.thinkingLive = true;
     this.render();
-    if (!st.handOver && st.actor === seat) {
+    if (!stale()) {
       this.table.setNextEnabled(true);
       this.updateHint();
       await this.flow.waitAfterThink(elapsed);
     }
 
-    if (st.handOver || st.actor !== seat) { this.thinkingLive = false; return; }
+    if (stale()) { this.thinkingLive = false; return; }
 
     // 交给引擎(非法的加注额会被引擎降级)
     agent.lastDecision = { ...decision, thinking: finalThink };
@@ -1205,15 +1370,20 @@ export class GameApp {
       this.recordHandThought(seat, agent?.name || this.engine.seatName(seat), finalThink);
     }
 
-    // 动作气泡:思考气泡收掉之后,原地再显示一小会儿「他做了什么」。
+    // 动作气泡:思考气泡收掉之后,原地再显示一小会儿「他做了什么 + 他说了什么」。
     //
     // 为什么要这个:玩家模式下看不到别人的思考内容,如果气泡直接消失,
     // 就只剩「刚才有人动了但不知道动了什么」—— 得去翻日志才知道。
     // 现在气泡会接着显示「跟注 20」这样的结果,看完自然消失。
+    //
+    // say 是模型**主动说出口**的那句话(可以是真话,也可以是心理战)——
+    // 和 thinking 是两回事:thinking 私密、玩家看不到,say 就是要给玩家看的。
+    // 本地策略没有 LLM 说话,agent 会给一句跟动作对得上的中性短句。
     const label = applied?.label || GameApp.actionLabel(decision.action, decision.amount);
-    if (this.mode === 'player' && label) {
+    if (this.mode === 'player' && (label || decision.say)) {
       this.actionSeat = seat;
       this.actionText = label;
+      this.actionSay = decision.say || '';
       this.actionUntil = performance.now() + Math.max(1400, 2600 / (this.flow.speed || 1));
     }
 
@@ -1280,6 +1450,24 @@ export class GameApp {
         await sleep(50);
       }
     }
+    // 等动画期间可能已经退回主页
+    if (!this.engine) return;
+
+    // 牌局结束 / 我被淘汰:给一个明确的结束状态和出口。
+    // 以前只有一条 toast,玩家模式下「发牌」按钮还会被藏掉 —— 画面停在那里不知道该干嘛。
+    const players = this.engine.state.players;
+    const alive = players.filter((p) => p.stack > 0);
+    if (alive.length < 2) {
+      const champ = alive[0];
+      this.table.showBanner('牌局结束', `${champ ? this.engine.seatName(champ.seat) : '?'} 赢下全场`, 6000);
+      this.table.toast('点右上角 ⚙ 设置 →「退出本局」可以回主页再来一局', 'ok', 9000);
+    } else if (this.mode === 'player' && !this._bustNoticed) {
+      const me = players[this.engine.state.humanSeat];
+      if (me && me.stack <= 0) {
+        this._bustNoticed = true;
+        this.table.toast('你已出局 —— 可以继续点「发牌 / 下一手」观战,或在 ⚙ 设置 里退出回主页', 'warn', 9000);
+      }
+    }
 
     this.refreshDealButton();
     this.updateHint();
@@ -1292,11 +1480,12 @@ export class GameApp {
     const VIEW_LABEL = { down: '盖着', board: '只看公共牌', up: '全部翻开' };
     const VIEW_ICON = { down: '🂠', board: '👀', up: '👁' };
     const btn = this.table.dom.btnPeek;
-    btn.innerHTML = `${VIEW_ICON[this.deckView] || '🂠'} 底牌 <b>${VIEW_LABEL[this.deckView] || '盖着'}</b>`;
+    // 文字部分包在 .btn__label 里(手机上只显示图标,见 sceneFull.js 顶栏模板)
+    btn.innerHTML = `${VIEW_ICON[this.deckView] || '🂠'}<span class="btn__label"> 底牌 <b>${VIEW_LABEL[this.deckView] || '盖着'}</b></span>`;
     btn.classList.toggle('is-active', this.deckView === 'up');
 
     const t = this.table.dom.btnThink;
-    t.innerHTML = `💭 气泡 <b>${this.ui.showThinking ? '开' : '关'}</b>`;
+    t.innerHTML = `💭<span class="btn__label"> 气泡 <b>${this.ui.showThinking ? '开' : '关'}</b></span>`;
     t.classList.toggle('is-active', this.ui.showThinking);
 
     const m = this.table.dom.btnMode;
@@ -1358,7 +1547,7 @@ export class GameApp {
       // 而且是**时效性**的 —— 时间一过就返回 null,气泡自然消失。
       actionBubble: (isPlayer && this.actionSeat !== null && this.actionSeat !== undefined
         && performance.now() < (this.actionUntil || 0))
-        ? { seat: this.actionSeat, text: this.actionText || '' }
+        ? { seat: this.actionSeat, text: this.actionText || '', say: this.actionSay || '' }
         : null,
       personaMap: this.personaMap,
       deltas: st.lastResult?.deltas,
@@ -1371,6 +1560,8 @@ export class GameApp {
   }
 
   render(extra = {}) {
+    // 退回主页后 engine 是 null;迟到的回调(节奏控制器、流式片段、快捷键)都会走到这里
+    if (!this.engine) return;
     const view = this.engine.viewForDealer();
     const ctx = this.ctx(extra);
     this.table.updateTopbar(view, this.statLine(), STREET_TEXT[view.street]);
@@ -1381,6 +1572,7 @@ export class GameApp {
   }
 
   renderSeatOnly(seat) {
+    if (!this.engine) return;
     const view = this.engine.viewForDealer();
     this.table.updateSeats(view, this.ctx());
     void seat;
@@ -1451,13 +1643,7 @@ export class GameApp {
 
     d.btnPeek.addEventListener('click', () => this.cycleDeckView());
 
-    d.btnModels.addEventListener('click', () => {
-      const seats = this.engine?.state?.players?.length || this.cfg?.game?.seats || 6;
-      // 第三个参数是座位显示名(模型名),面板用它展示「这个名字是谁」
-      this.modelsPanel.setSeats(seats, this.personaMap, this.seatNames);
-      this.modelsPanel.fill(this.cfg);
-      this.modelsPanel.show();
-    });
+    d.btnModels.addEventListener('click', () => this.openModelsPanel());
 
     d.btnThink.addEventListener('click', async () => {
       this.ui.showThinking = !this.ui.showThinking;
@@ -1486,18 +1672,29 @@ export class GameApp {
     });
 
     window.addEventListener('keydown', (e) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
+      const t = e.target;
+      if (t instanceof HTMLInputElement || t instanceof HTMLSelectElement
+        || t instanceof HTMLTextAreaElement || t?.isContentEditable) return;
+      if (e.key === 'Escape') { this.drawer.hide(); this.modelsPanel.hide(); return; }
+      // 主页 / 设置 / 确认框开着时不响应牌桌快捷键:
+      // 否则主页上按空格会去发牌(engine 还是 null,直接抛错),
+      // 设置页里聚焦按钮按空格也会被 preventDefault 吃掉
+      if (!this.engine || document.querySelector('.setup.is-open') || this.confirmEl) return;
+      // 焦点在按钮上时空格 / 回车交给按钮自己(原生就是「点它」)
+      const onButton = t instanceof HTMLButtonElement;
       // 空格 / 回车 = 下一位;没有在等待时就发牌
-      if ((e.code === 'Space' || e.code === 'Enter') && !e.repeat) {
+      if ((e.code === 'Space' || e.code === 'Enter') && !e.repeat && !onButton) {
         e.preventDefault();
         if (this.flow.waiting) this.flow.advance();
-        else if (!d.btnDeal.disabled) this.dealNext();
+        else if (this.canDeal()) this.dealNext();
       }
-      if (e.key === 'p' || e.key === 'P') d.btnPeek.click();
       if (e.key === 'm' || e.key === 'M') d.btnModels.click();
+      // 下面这几个是荷官专属:玩家模式下按钮只是被隐藏了,对隐藏按钮 .click() 照样会触发 ——
+      // 按 T 就能在下注前看到所有 AI 这一手的思考(「我有 AA,慢打」),破坏信息隔离
+      if (this.mode === 'player') return;
+      if (e.key === 'p' || e.key === 'P') d.btnPeek.click();
       if (e.key === 't' || e.key === 'T') d.btnThinkLog.click();
       if (e.key === 'a' || e.key === 'A') d.btnMode.click();
-      if (e.key === 'Escape') { this.drawer.hide(); this.modelsPanel.hide(); }
     });
   }
 }

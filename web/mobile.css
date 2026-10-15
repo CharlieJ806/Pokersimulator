@@ -235,6 +235,80 @@ canvas#gl {
   .home__modes { grid-template-columns: 1fr; }
 }
 
+/* ============================================================ 紧凑屏通用(手机横屏 + 竖屏/窄屏) */
+
+@media (orientation: landscape) and (max-height: 500px), (max-width: 820px) {
+  /* —— 顶栏按钮只留图标 ——
+     六个带文字的按钮总宽 ~560px,手机上放不下:顶栏虽然能横向滚动,
+     但没有任何提示,竖屏时右边的「⚙ 设置」直接在屏幕外 —— 用户找不到退出入口。
+     文字在 title 里,长按 / 悬停能看到。 */
+  .topbar .btn__label { display: none; }
+  .topbar .btn {
+    min-width: 40px;
+    padding: 0 9px;
+    font-size: 16px;
+    line-height: 1;
+  }
+  .topbar .btn.is-active { border-color: var(--gold-2); }
+  .brand { font-size: 13px; letter-spacing: .03em; }
+
+  /* —— 手牌一览:把「手牌一览 / 收起」那一行并进公共牌行 ——
+     单独一行的标题在手机上纯占地方(约 24px),而那 24px 正好是 3D 牌桌最缺的。
+     收起按钮浮到公共牌行的右端,公共牌行右侧留出它的位置。 */
+  .handstrip__head {
+    position: absolute; top: 0; right: 0; z-index: 2;
+    border-bottom: none; background: none;
+    padding: 3px 6px; min-height: 0;
+  }
+  .handstrip__title, .handstrip__note { display: none; }
+  .handstrip__board { padding-right: 64px; min-height: 38px; }
+  .boardcard { width: 24px; height: 33px; font-size: 11.5px; }
+
+  /* —— 轮到我时,提示行「轮到你:跟注要 59…」和按钮上的「跟注 59」是同一件事 ——
+     手机上省掉它,把高度还给牌桌(不是我的回合时仍然显示「等待 XX 行动…」)。 */
+  .pbar__prompt.is-my-turn { display: none; }
+
+  /* toast 贴在顶栏下面,窄一点 */
+  .toast { top: 50px; max-width: calc(100vw - 24px); padding: 7px 12px; font-size: 12px; }
+
+  /* 摊牌横幅:大字在手机上会压住半张桌子 */
+  .banner { top: 22%; padding: 8px 22px 10px; }
+  .banner__main { font-size: 22px; }
+  .banner__sub { font-size: 12.5px; }
+
+  /* 主页头图:窄屏上矮一点 */
+  .home__hero { height: 130px; margin: 14px 18px 0; }
+}
+
+/* 手机横屏只有 ~390px 高:头图会把两张模式卡片挤到屏幕外,干脆不显示 */
+@media (orientation: landscape) and (max-height: 500px) {
+  .home__hero { display: none; }
+}
+
+/* 竖屏 / 窄屏:底部那条操作条的高度也由 JS 量,手牌一览贴在它上面(桌面值 82px 会留出一道空隙) */
+@media (max-width: 820px) {
+  .handstrip { bottom: calc(var(--actionbar-h, 64px) + 6px); }
+  .actionbar { padding: 6px 10px calc(8px + env(safe-area-inset-bottom, 0px)); }
+}
+
+/* 很窄的竖屏(普通手机):顶栏再省一点 —— 品牌名和牌堆标签让位给按钮 */
+@media (max-width: 520px) {
+  .topbar { gap: 6px; padding: 0 8px; height: 46px; }
+  .brand, #deckTag { display: none; }
+  .topbar__tag { font-size: 11px; padding: 2px 7px; }
+  .street { padding: 3px 10px; letter-spacing: .08em; font-size: 12px; }
+  .pbar__stats { gap: 10px; padding: 5px 10px; }
+  .pstat__label { font-size: 10.5px; }
+  .home__brand { padding: 22px 20px 4px; }
+  /* 设置页标题:副标题单独一行,别被拆成「Poker / Simulator」两截 */
+  .setup__head h1 { font-size: 21px; }
+  .setup__head h1 .setup__ver { display: block; margin: 4px 0 0 1px; }
+  .home__modes { padding: 16px 20px 8px; }
+  .setup__foot { padding: 12px 16px 16px; }
+  .setup__footBtns { width: 100%; }
+  .setup__footBtns .btn { flex: 1 1 auto; }
+}
+
 /* ============================================================ 触控目标下限 */
 
 /*

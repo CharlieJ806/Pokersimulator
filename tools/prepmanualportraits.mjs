@@ -39,13 +39,52 @@ const ROOT = path.resolve(__dirname, '..');
 const DIR = path.join(ROOT, 'assets', 'portraits');
 const log = (m) => process.stdout.write(m + '\n');
 
-/** 从 crosspet 取来的那 6 套 —— 这些不是手工素材,跳过 */
-const CROSSPET = new Set(['claude', 'deepseek', 'deepseek-hoodie', 'gemini', 'glm', 'gpt']);
+/** 从 crosspet 取来的那几套 —— 这些不是手工素材,跳过 */
+const CROSSPET = new Set(['claude', 'deepseek', 'gemini', 'glm', 'gpt']);
 
 /** 手工素材的角色信息(展示名与 accent;没配的用目录名 + 中性色) */
 const META = {
   qwen: { name: 'Qwen', accent: '#6f7bd6' },
   grok: { name: 'Grok', accent: '#e2574c' },
+  kimi: { name: 'Kimi', accent: '#5b6fc4' },
+  mimo: { name: 'MiMo', accent: '#f08a24' },
+};
+
+/**
+ * 按角色的抠图参数。没写的角色走默认(白底 JPG 那套:阈值 246、只从边缘填充)。
+ *
+ *   crop     先按像素裁掉四边 [上, 右, 下, 左](去截图边框、隔壁角色、水印)
+ *   step     渐变容差填充:相邻像素色差 ≤ step 且足够亮(≥ low)就算背景。
+ *            用在**背景不是纯白**的图上(kimi 那张是带噪点的淡紫渐变,最暗处只有 243,
+ *            固定阈值 246 会留下一块块残底)。动漫立绘有深色描边,填充会在描边处停下,
+ *            所以不会顺着白头发钻进人物里面。
+ *   keep     去碎块:只保留面积 ≥ 最大块 × keep 的不透明连通块。
+ *            用来去掉和人物不相连的装饰(星星、音符、对话气泡、乐谱纸)。
+ *   seeds    额外的背景种子点(原图坐标):被装饰围住、从四边填不进去的白底从这里开始填。
+ *   erase    手工擦除框 [[x0,y0,x1,y1], …](**原图**像素坐标,裁边之前)。
+ *            和人物连在一起、颜色又分不开的装饰只能这样去(kimi 的月亮弧、彩虹光束)。
+ *            换了源图要重新量这几个框。
+ */
+const OPTS = {
+  // 截图四周有一圈 2px 的浅灰边框;旁边的爱心气泡 / 星星是独立小块
+  mimo: { crop: [3, 3, 3, 3], keep: 0.06 },
+  // 右侧边缘有隔壁角色被切掉的一截,左下角有作者水印
+  kimi: {
+    crop: [0, 14, 12, 0], step: 9, low: 205, keep: 0.12,
+    erase: [
+      [300, 196, 446, 268],  // 从眼睛射向右边的彩虹光束(脸右侧以外)
+      [330, 40, 446, 196],   // 右上的音符
+      [0, 470, 74, 620],     // 左侧飘着的乐谱纸
+      [340, 640, 446, 754],  // 右下角的叶子
+      [0, 698, 160, 754],    // 地面阴影(鞋子两侧;鞋子本身在 x 160~285)
+      [285, 698, 446, 754],
+    ],
+    eraseSat: [[255, 192, 300, 266, 46]],   // 彩虹贴着脸 / 头发的那一段(只擦鲜艳的像素)
+    // 月亮弧和人物之间那块白底是被围住的,从四边填不进去 —— 从这几个点开始填
+    // (照常比色差,碰到人物描边就停)。白底清掉后月亮弧不再和人物相连,keep 会把它去掉。
+    // 两腿之间、腿两侧的白底被裙摆和地面阴影围住,同样要补种子
+    seeds: [[100, 150], [95, 250], [110, 90], [70, 330], [215, 640], [140, 650], [300, 650]],
+  },
 };
 
 /** 已处理产物的文件名 —— 选源图时必须排除,否则会把 idle.webp 再抠一遍 */
@@ -107,16 +146,19 @@ app.whenReady().then(async () => {
     const srcDataUrl = `data:${mime};base64,${fs.readFileSync(path.join(srcDir, pick)).toString('base64')}`;
 
     // 像素活儿全在渲染进程做:解码 JPG → 抠底 → 裁边 → 导出 WebP
+    const opt = OPTS[id] || {};
     const res = await js(`(async () => {
       const srcUrl = ${JSON.stringify(srcDataUrl)};
+      const OPT = ${JSON.stringify(opt)};
       const img = new Image();
       await new Promise((ok, bad) => { img.onload = ok; img.onerror = () => bad(new Error('图片加载失败')); img.src = srcUrl; });
-      const W = img.naturalWidth, H = img.naturalHeight;
+      const [cT, cR, cB, cL] = OPT.crop || [0, 0, 0, 0];
+      const W = img.naturalWidth - cL - cR, H = img.naturalHeight - cT - cB;
       const cv = document.createElement('canvas');
       cv.width = W; cv.height = H;
       const g = cv.getContext('2d', { willReadFrequently: true });
       g.clearRect(0, 0, W, H);
-      g.drawImage(img, 0, 0);
+      g.drawImage(img, -cL, -cT);
       const idat = g.getImageData(0, 0, W, H);
       const px = idat.data;
 
@@ -134,17 +176,51 @@ app.whenReady().then(async () => {
       const whiteish = (i) => Math.min(px[i], px[i+1], px[i+2]) >= FILL_MIN;
       const marked = new Uint8Array(W * H);
       const queue = [];
-      const push = (x, y) => {
+      // —— 手工擦除框(原图坐标 → 裁边后的坐标)——
+      // ⚠️ 必须在填充**之前**做,并且把擦掉的区域当作填充的通道:
+      //    kimi 的月亮弧把一块白底围在中间,从四边开始的填充进不去,
+      //    擦完弧之后那块白底还在(实测人物左边留了一块白矩形)。
+      const forced = new Uint8Array(W * H);
+      for (const [x0, y0, x1, y1] of OPT.erase || []) {
+        for (let y = Math.max(0, y0 - cT); y < Math.min(H, y1 - cT); y++) {
+          for (let x = Math.max(0, x0 - cL); x < Math.min(W, x1 - cL); x++) forced[y * W + x] = 1;
+        }
+      }
+      // 只擦**颜色鲜艳**的像素(彩虹光束贴着脸的那一段:头发是浅色、几乎不饱和)
+      for (const [x0, y0, x1, y1, sat] of OPT.eraseSat || []) {
+        for (let y = Math.max(0, y0 - cT); y < Math.min(H, y1 - cT); y++) {
+          for (let x = Math.max(0, x0 - cL); x < Math.min(W, x1 - cL); x++) {
+            const i = (y * W + x) * 4;
+            if (Math.max(px[i], px[i+1], px[i+2]) - Math.min(px[i], px[i+1], px[i+2]) >= sat) forced[y * W + x] = 1;
+          }
+        }
+      }
+
+      // 渐变容差模式:亮度够 + 与「从哪一格扩过来」的色差够小,才算背景
+      const STEP = OPT.step || 0, LOW = OPT.low || FILL_MIN;
+      const bgOK = (k, from) => {
+        if (forced[k]) return true;
+        if (from >= 0 && forced[from]) from = -1;   // 从擦除区扩出来时不比色差,只看亮度
+        const i = k * 4;
+        if (!STEP) return whiteish(i);
+        if (Math.min(px[i], px[i+1], px[i+2]) < LOW) return false;
+        if (from < 0) return true;
+        const j = from * 4;
+        return Math.abs(px[i] - px[j]) <= STEP && Math.abs(px[i+1] - px[j+1]) <= STEP && Math.abs(px[i+2] - px[j+2]) <= STEP;
+      };
+      const push = (x, y, from = -1) => {
         if (x < 0 || y < 0 || x >= W || y >= H) return;
         const k = y * W + x;
-        if (marked[k] || !whiteish(k * 4)) return;
+        if (marked[k] || !bgOK(k, from)) return;
         marked[k] = 1; queue.push(k);
       };
       for (let x = 0; x < W; x++) { push(x, 0); push(x, H - 1); }
       for (let y = 0; y < H; y++) { push(0, y); push(W - 1, y); }
+      for (let k = 0; k < W * H; k++) if (forced[k] && !marked[k]) { marked[k] = 1; queue.push(k); }
+      for (const [sx, sy] of OPT.seeds || []) push(sx - cL, sy - cT);
       for (let head = 0; head < queue.length; head++) {
         const k = queue[head], x = k % W, y = (k - x) / W;
-        push(x-1, y); push(x+1, y); push(x, y-1); push(x, y+1);
+        push(x-1, y, k); push(x+1, y, k); push(x, y-1, k); push(x, y+1, k);
       }
       let cleared = 0;
       for (let k = 0; k < W * H; k++) if (marked[k]) cleared++;
@@ -171,6 +247,33 @@ app.whenReady().then(async () => {
         px[i4+3] = Math.max(0, Math.min(255, a));
       }
 
+      // —— 去碎块:只留和人物相连的部分(8 邻接连通块,按面积筛) ——
+      if (OPT.keep) {
+        const comp = new Int32Array(W * H).fill(-1);
+        const sizes = [];
+        const stack = [];
+        for (let k0 = 0; k0 < W * H; k0++) {
+          if (comp[k0] !== -1 || px[k0 * 4 + 3] <= 8) continue;
+          const id = sizes.length; let n = 0;
+          comp[k0] = id; stack.push(k0);
+          while (stack.length) {
+            const k = stack.pop(); n++;
+            const x = k % W, y = (k - x) / W;
+            for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+              const nx = x + dx, ny = y + dy;
+              if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+              const nk = ny * W + nx;
+              if (comp[nk] === -1 && px[nk * 4 + 3] > 8) { comp[nk] = id; stack.push(nk); }
+            }
+          }
+          sizes.push(n);
+        }
+        const biggest = Math.max(0, ...sizes);
+        for (let k = 0; k < W * H; k++) {
+          if (comp[k] >= 0 && sizes[comp[k]] < biggest * OPT.keep) px[k * 4 + 3] = 0;
+        }
+      }
+
       // —— 裁掉四周全透明的边 ——
       const A = (x, y) => px[(y * W + x) * 4 + 3];
       let top = 0, bottom = H - 1, left = 0, right = W - 1;
@@ -179,7 +282,7 @@ app.whenReady().then(async () => {
       while (top < bottom && rowEmpty(top)) top++;
       while (bottom > top && rowEmpty(bottom)) bottom--;
       while (left < right && colEmpty(left)) left++;
-      while (right > left && colEmpty(right)) right++;
+      while (right > left && colEmpty(right)) right--;   // 以前写成 right++,右边是空列时会越界多算一列
       const ow = right - left + 1, oh = bottom - top + 1;
 
       const out = document.createElement('canvas');

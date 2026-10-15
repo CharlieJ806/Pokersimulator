@@ -111,7 +111,7 @@ vendor/three.module.js   three.js r169(MIT,单文件,离线)
   许可是 **CC BY-NC-SA 4.0**(署名 — **非商业性使用** — 相同方式共享),
   **与代码的 MIT 不同、而且更严格**。
 
-> ⚠️ **关于立绘的许可**:这 30 张立绘按 CC BY-NC-SA 4.0 发布,所以
+> ⚠️ **关于立绘的许可**:这 25 张立绘按 CC BY-NC-SA 4.0 发布,所以
 > 1. 必须保留署名(见 [assets/portraits/SOURCES.md](assets/portraits/SOURCES.md));
 > 2. **本项目的这类版本不得用于商业目的**;
 > 3. 基于它做的衍生作品也要以 CC BY-NC-SA 4.0 发布。

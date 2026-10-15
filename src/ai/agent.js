@@ -22,6 +22,20 @@ import { riskLabel } from './personas.js';
  * 而线上带着 —— 正是「测试通过、线上截断」那类最难查的偏差。
  */
 let sharedProvidersMod = null;
+let sharedStreamMod = null;
+
+/**
+ * 厂商 id。
+ * ⚠️ app.js 传进来的 cfg.provider 是**整个厂商对象**(界面要用它的 name),
+ *    而 getProvider() 只认字符串 id —— 把对象直接传下去会查不到、静默退回 deepseek:
+ *    结果 OpenAI / Claude / Gemini 的请求体里都被塞进 deepseek 的 reasoning_effort,
+ *    本地模型(不需要 Key)也会被当成「缺 Key」拒掉。所以统一从这里取 id。
+ */
+function providerIdOf(cfg) {
+  if (cfg?.providerId) return cfg.providerId;
+  if (typeof cfg?.provider === 'string') return cfg.provider;
+  return cfg?.provider?.id || 'deepseek';
+}
 
 const ACTION_LABEL = { fold: '弃牌', check: '看牌', call: '跟注', raise: '加注', allin: '全下' };
 
@@ -170,6 +184,122 @@ function fallbackDecide(seatView, persona) {
   return { action: 'fold', note: `${handName},不值得跟 ${toCall}` };
 }
 
+/**
+ * 清洗模型给的「牌桌发言」。
+ *
+ * 模型经常不听话,会把这段话写得又长又啰嗦(或者干脆把思考过程抄进来),
+ * 而气泡就那么点大 —— 所以这里强制收敛:
+ * 去掉换行、去掉首尾引号、压掉多余空格,再截到 24 个字。
+ * 空字符串是**合法**的(提示词里明确允许「这手不说话」)。
+ */
+function cleanSay(v) {
+  if (v === null || v === undefined) return '';
+  let s = String(v).replace(/\s+/g, ' ').trim();
+  // 模型爱自作主张加引号(「」「"" ''),气泡里再套一层引号很难看
+  s = s.replace(/^["'“”‘’「」『』]+|["'“”‘’「」『』]+$/g, '').trim();
+  if (s.length > 24) s = s.slice(0, 24);
+  return s;
+}
+
+/**
+ * 本地策略没有 LLM 说话,但玩家模式下如果桌上始终没人开口会很死。
+ * 给一句**跟动作对得上的中性短句** —— 刻意不编造牌力
+ * (本地策略的行动是算出来的,随口说「我拿的是AA」会和实际打法矛盾)。
+ */
+const LOCAL_SAY = {
+  fold: ['这手先放了。', '不划算,过。', '你们玩。'],
+  check: ['过。', '看一张。', '不要。'],
+  call: ['跟了。', '陪你看看。', '行,跟。'],
+  raise: ['加点压力。', '这个价你接得住吗?', '往上抬一点。'],
+  allin: ['全下了。', '就这一把。', '不用想了。'],
+};
+function localSay(action) {
+  const arr = LOCAL_SAY[action];
+  return arr ? arr[Math.floor(Math.random() * arr.length)] : '';
+}
+
+/**
+ * 从厂商/中转站的报错里认出「哪个参数它不认」。
+ *
+ * 为什么需要:不同模型对**可选参数**的容忍度差别极大。
+ * 最典型的是 OpenAI 的 o 系列 / gpt-5 系列,它们会直接拒绝:
+ *   "Unsupported value: 'temperature' does not support 1.1 with this model.
+ *    Only the default (1) is supported."
+ * 还有些模型只认 max_completion_tokens、不认 max_tokens。
+ *
+ * 中转站把几十家模型挂在**同一个地址**后面,所以我们发的那套统一参数
+ * 必然有一部分模型不认 —— 用户看到的就是「大部分模型都调用失败」。
+ *
+ * 与其维护一张「哪些模型支持 temperature」的白名单(永远追不上新模型),
+ * 不如**按报错自适应降级**:它说哪个字段不认,就摘掉哪个再发一次。
+ * 只摘可选参数,模型名/消息体这些必需的绝不摘 —— 摘了就变成另一种错。
+ */
+function unsupportedParamIn(text) {
+  const t = String(text || '');
+  // 先确认这确实是「参数不支持 / 参数超出范围」类报错,而不是「模型不存在」「余额不足」。
+  // 范围类的措辞也要认:Claude 走 OpenAI 兼容口时报的是
+  // "temperature: Input should be less than or equal to 1",GLM 报「取值范围是 (0, 1]」——
+  // 只认 unsupported/invalid 的话这两种都漏掉。
+  if (!/unsupported|not supported|does not support|invalid|unrecognized|unknown|不支持|额外|extra|range|less than|greater than|must be|should be|between|exceed|out of|only .*allowed|取值|范围|超出/i.test(t)) return null;
+
+  /**
+   * 我们可能会发出去的可选参数。报错里提到哪个就摘哪个。
+   *
+   * ⚠️ thinking / reasoning_effort 必须在这里。它们原本是给 DeepSeek 用的,
+   *    但**截断重试**会把 `thinking: {type:'disabled'}` 塞进请求体
+   *    (见 decide 里的重试分支),而中转站后面绝大多数模型不认这个字段。
+   *    于是现象就是「第一次调用成功(但被截断)→ 重试带着 thinking → 400 失败」。
+   *    只覆盖 temperature/max_tokens 的时候,这一条会被漏掉。
+   *
+   * ⚠️ **嵌套字段**也必须能认出来(canonical 名统一成 'thinking' / 'reasoning'):
+   *    推理档位这套参数不止顶层有 —— Gemini 的 thinkingConfig 嵌在
+   *    generationConfig 里,字段名在报错文本里长这样:
+   *      "thinking_budget is out of range"、"thinkingConfig.thinkingBudget: invalid"
+   *      "thinking.budget_tokens must be less than max_tokens"
+   *      "Unsupported parameter: 'reasoning.effort'"
+   *    只按 'thinking' 一个字去匹配虽然能碰对大半,但漏掉
+   *    thinkingBudget / thinking_budget / budget_tokens 这几个写法就会「降级不了、
+   *    直接失败」—— 而这一版刚把 Gemini 的预算从 0 改成 512、给 Anthropic 加了
+   *    1024,正是新参数最可能被某个型号拒掉的时候,兜底必须真的兜得住。
+   *    摘掉整块的实现见 shared/llmStream.mjs 的 omit 处理(顶层 delete 摘不到嵌套)。
+   *
+   *    顺序要紧,分两轮扫,而且**思考类必须排在额度类前面**:
+   *      · 'reasoning_effort' 要排在 'reasoning' 前面 —— 后者是前者的子串,
+   *        反了的话一个本该按顶层字段摘的报错会被当成 responses 的 reasoning 对象,
+   *        openai 协议上就摘了个不存在的东西(降级了但报错照旧)。
+   *      · 思考类排在 max_tokens 前面,因为这类报错**经常同时提到额度**:
+   *        Anthropic 的 "thinking.budget_tokens: Input should be less than max_tokens"
+   *        里两个词都有。先命中 max_tokens 就会去摘额度 ——
+   *        而 max_tokens 对 Anthropic 是**必需字段**,摘掉直接变成另一种 400,
+   *        降级反而把请求弄坏了。真正的病因是思考预算,摘它才对。
+   */
+  const OPTIONAL = [
+    // —— 第一轮:思考 / 推理块(含各自的嵌套写法)——
+    ['reasoning_effort', 'reasoning_effort'],
+    ['thinkingconfig', 'thinking'],           // Gemini:generationConfig.thinkingConfig
+    ['thinkingbudget', 'thinking'],
+    ['thinking_budget', 'thinking'],
+    ['thinking budget', 'thinking'],
+    ['budget_tokens', 'thinking'],            // Anthropic:thinking.budget_tokens
+    ['thinking', 'thinking'],
+    ['reasoning.effort', 'reasoning'],        // Responses:reasoning.effort
+    ['reasoning', 'reasoning'],
+    // —— 第二轮:其余可选参数 ——
+    ['temperature', 'temperature'],
+    // 同义字段:不同协议/世代叫法不同,但都是「输出额度」这一个东西。
+    // 报错里出现哪个都归到 canonical 名 'max_tokens',
+    // 由 buildRequest 的 omit 把这几个同义字段一起删掉。
+    ['max_completion_tokens', 'max_tokens'],
+    ['max_output_tokens', 'max_tokens'],      // Responses 协议的叫法
+    ['max_tokens', 'max_tokens'],
+    ['top_p', 'top_p'],
+  ];
+  for (const [needle, field] of OPTIONAL) {
+    if (t.toLowerCase().includes(needle)) return field;
+  }
+  return null;
+}
+
 /** 从模型输出里抠出 JSON(容错:代码块、前后废话、单引号) */
 function extractJson(text) {
   if (!text) return null;
@@ -202,7 +332,9 @@ class PokerAgent {
   /**
    * @param {number} seat
    * @param {object} persona
-   * @param {object} cfg  { endpoint, apiKey, model, timeoutMs, temperature, maxTokens }
+   * @param {object} cfg  { endpoint, apiKey, model, timeoutMs, temperature, maxTokens, reasoningLevel, kind }
+   *   reasoningLevel:'off'|'low'|'default' —— 四家协议各自的思考档位,由 shared/llmStream.mjs
+   *   统一落到字段上(默认 'low':保留推理但压到最低)。
    * @param {object} hooks { onThink(chunk, full, thinking), onDecision(obj), onError(err), onDebug(msg), onTruncated(info) }
    *   thinking=true 表示这是模型「推理阶段」的增量(如 deepseek 的 reasoning_content),
    *   而不是正式回答 —— 界面可以显示得淡一些,并在正式回答到达时切换。
@@ -260,6 +392,11 @@ class PokerAgent {
       '【这是博弈,不只是算术 —— 光看牌力赢不了】',
       '最重要的观念:你赢的钱**主要来自让对手做错决定**,不是来自你手里的牌好。',
       '牌好就下注、牌差就弃牌,这种打法对手一看就懂,你永远赢不到大钱。',
+      '',
+      '【节奏:这是牌桌,不是长考】',
+      '你要**快速决断** —— 像真人一样,几秒钟就下决定,不要反复推演。',
+      '内部推理尽量短(一两句话够了),把篇幅留给最终那个 JSON。',
+      '想太久会被判超时,那一手就白打了。',
       '',
       '【诈唬:这是核心技能,不是偶尔的调剂】',
       '你每一手都要问自己一句:**如果我现在下注,他会不会弃牌?**',
@@ -319,8 +456,24 @@ class PokerAgent {
       '✓ 对的:"Q6o 是边缘牌,但按钮位有位置、赔率也便宜,跟 20 看个翻牌。"',
       '✓ 对的:"前面都没加注,说明也没人有强牌,我这里可以下注把他们赶走。"',
       '',
+      '【关于 say 字段 —— 你**说出口**的那句话】',
+      '`say` 是你真的在牌桌上说出口的一句话,会显示在你头顶的气泡里给所有人看。',
+      '在玩家模式下,这是别人唯一能看到的内容(`thinking` 是私密的,不给玩家看)。',
+      '',
+      '硬性要求:',
+      '· **不超过 20 个字**,像牌桌上随口说的一句,不要解释、不要复述规则。',
+      '· **必须和你这次的动作对得上**:弃牌就别喊加注,跟注别喊「我不玩了」。',
+      '· 只说你自己知道的(你的底牌、你的读牌),**不要报别人的底牌**。',
+      '',
+      '内容可以是真的,也可以是**心理战** —— 这正是这个字段的用处:',
+      '· 手里是坚果,可以装作犹豫:「这注有点大啊……」',
+      '· 手里是空气,可以放狠话:「我劝你别跟。」',
+      '· 也可以只是中性的一句:「跟了。」「过。」',
+      '说什么由你的性格决定:诈唬型爱放话,保守型话少。',
+      '**不想说话就留空字符串 ""** —— 连话都不说也是一种风格,不用每手都开口。',
+      '',
       '【输出格式】(严格 JSON,不要 markdown 代码块)',
-      '{"thinking":"一到两句中文,40 字以内","action":"fold|check|call|raise","amount":数字}',
+      '{"thinking":"一到两句中文,40 字以内","say":"牌桌上说的一句话,20 字以内,可留空","action":"fold|check|call|raise","amount":数字}',
       '说明:check / call / fold 时 amount 可省略;raise 时 amount 是「加注到」的目标总额(不是增量)。想全下就把 amount 写成你的最大可用额。',
     ].filter(Boolean).join('\n');
   }
@@ -662,7 +815,13 @@ class PokerAgent {
     // 这个模型(deepseek-flash)会先用 reasoning_content 想一大段,
     // 那段也吃 max_tokens。预算小了就会出现「推理写完了、正式 JSON 没吐出来」——
     // 实测原始输出停在半句英文推理上,笔记直接丢掉(踩过)。
-    const noteBudget = Math.max(Number(this.cfg?.maxTokens) || 1200, 1800);
+    //
+    // ⚠️ 为什么地板是 3000 而不是 1800:笔记是**一整个 JSON,要覆盖名单上的每个人**
+    //    (6 人桌 5 个对手 × 最多 40 字 ≈ 300~500 token 的正文),再加一段推理草稿。
+    //    1800 在对手多、笔记已经攒了几轮(每次都要把旧笔记抄回去)的时候只剩几百 token
+    //    给正文,截断一次就白写一次 —— 而它是每 3 手才有一次的长期记忆,丢了很可惜。
+    //    3000 是「推理 + 全部对手的一句话」都装得下的值,且只在每 N 手触发一次。
+    const noteBudget = Math.max(Number(this.cfg?.maxTokens) || 2000, 3000);
     const missing = () => {
       this.stats.noteFailures++;
       this.hooks.onDebug?.(`[notes] seat${this.seat} 解析失败,原始输出: ${String(this.lastNoteRaw || '').slice(0, 200)}`);
@@ -761,7 +920,7 @@ class PokerAgent {
       const d = fallbackDecide(view, this.persona);
       this.stats.fallback++;
       const thinking = `(本地策略)${d.note || ''}`.trim();
-      return { action: d.action, amount: d.amount, thinking, source: 'fallback' };
+      return { action: d.action, amount: d.amount, thinking, say: localSay(d.action), source: 'fallback' };
     };
 
     if (!this.cfg?.endpoint || (!this.cfg?.apiKey && !this.cfg?.noKey)) {
@@ -793,9 +952,19 @@ class PokerAgent {
        */
       if (truncated) {
         this.hooks.onDebug?.(`[座位${this.seat + 1}] 截断,重试一次(本次关掉推理通道)`);
+        /**
+         * `thinking: {type:'disabled'}` 只有 DeepSeek 系认。
+         * 自定义中转站后面挂的是哪家模型完全不确定 —— 发了大概率被拒
+         * (现象就是「第一次成功、第二次失败」),所以对它**直接不发**,
+         * 靠下面调大 max_tokens 达成同样的目的:把额度全留给正式回答。
+         * 真遇到不认的厂商,下面的参数降级重试还会兜一层。
+         */
+        const supportsThinkingOff = providerIdOf(this.cfg) === 'deepseek';
         raw = await this.callLLM(system, user, opts.signal, null, {
-          requestExtra: { thinking: { type: 'disabled' } },
-          maxTokens: Math.max(1200, (this.cfg?.maxTokens || 1200)),
+          requestExtra: supportsThinkingOff ? { thinking: { type: 'disabled' } } : null,
+          // 推理型模型(gpt-5 / Claude thinking / kimi-thinking)的草稿很长,额度要真的翻倍。
+          // 默认额度 2000 → 这里 4000,仍然高于 2400 的地板(小额度配置下地板兜底)。
+          maxTokens: Math.max(2400, (this.cfg?.maxTokens || 2000) * 2),
         });
         truncated = this.lastTruncated;
         if (truncated) {
@@ -807,10 +976,11 @@ class PokerAgent {
 
       const elapsed = Date.now() - started;
       const parsed = extractJson(raw);
-      let action = null, amount, thinking = '';
+      let action = null, amount, thinking = '', say = '';
 
       if (parsed) {
         thinking = String(parsed.thinking ?? parsed.reasoning ?? parsed.reason ?? '').trim();
+        say = cleanSay(parsed.say ?? parsed.speech ?? parsed.talk ?? parsed.line);
         action = normalizeActionWord(parsed.action ?? parsed.move ?? parsed.decision);
         amount = Number(parsed.amount ?? parsed.raiseTo ?? parsed.to ?? parsed.bet ?? 0) || undefined;
       } else {
@@ -827,7 +997,7 @@ class PokerAgent {
 
       // 极端情况:模型要求加注但金额离谱 → 交给引擎规范化(引擎会把非法的降级)
       this.stats.llmOk++;
-      const decision = { action, amount, thinking: thinking || '…', source: 'llm', elapsedMs: elapsed };
+      const decision = { action, amount, thinking: thinking || '…', say, source: 'llm', elapsedMs: elapsed };
       this.hooks.onDecision?.(decision);
       this.history.push({ handNo: view.handNo, street: view.street, action, amount });
       return decision;
@@ -845,6 +1015,7 @@ class PokerAgent {
    */
   async callLLM(system, user, externalSignal, hookCtx, overrides) {
     const cfg = { ...this.cfg, ...(overrides || {}) };
+    const providerId = providerIdOf(cfg);
     // hookCtx 用来把「写笔记」这类**非决策**调用的流式回调引开 ——
     // 否则笔记的流式片段会被当成思考喂进牌桌上的气泡(串台)。
     const hooks = hookCtx || this.hooks;
@@ -857,9 +1028,31 @@ class PokerAgent {
         externalSignal.addEventListener('abort', onAbort, { once: true });
       }
       try {
-        const res = await api.llmChat({
-          requestId,
-          provider: cfg.provider || 'deepseek',
+        /**
+         * 参数降级重试 —— **真实游戏走的就是这条路**。
+         *
+         * ⚠️ 以前降级只写在下面的 callLLMDirect(纯 Node 测试用)里,
+         *    这条网页版 / 桌面版真正走的路径没有:测试里模型不认 temperature 会自动摘掉重试、
+         *    测试全绿;游戏里同样的报错直接 400、退回本地策略。
+         *    这就是「中转站大部分模型调用失败」一直查不出来的原因。
+         */
+        const omit = [];
+        let res;
+        /**
+         * 截断检测所需的两个计数。
+         *
+         * ⚠️ this.lastTruncated 以前**只有** callLLMDirect(Node 测试路径)会写,
+         *    这条真实路径从来不写 —— 于是 decide() 里的「截断就重试一次」
+         *    在游戏里永远不会触发(只有测试能触发),又是一处
+         *    「测试全绿、游戏里没生效」。所以这里也把它算出来。
+         *    判据与直连路径一致:只来了推理、正式回答一个字都没有。
+         */
+        let sawReasoning = false;
+        let sawAnswer = false;
+        for (let attempt = 0; ; attempt++) {
+          res = await api.llmChat({
+            requestId: attempt ? `${requestId}-r${attempt}` : requestId,
+            provider: providerId,
           kind: cfg.kind,
           endpoint: cfg.endpoint,
           apiKey: cfg.apiKey || '',
@@ -869,15 +1062,48 @@ class PokerAgent {
           temperature: cfg.temperature ?? 1.1,
           maxTokens: cfg.maxTokens ?? 300,
           timeoutMs: cfg.timeoutMs || 45000,
+          // 推理档位(off/low/default)。必须透传:这个值决定四条协议各自发什么
+          // 思考参数(见 shared/llmStream.mjs 的 REASONING_LEVELS)。
+          // ⚠️ timeoutMs / maxTokens 当年就是因为 agentCfg 没传而变成死字段 ——
+          //    新加配置项时一定要顺着「界面 → 配置 → agentCfg → 这里」走一遍。
+          reasoningLevel: cfg.reasoningLevel,
           // 厂商特有的请求参数(例如 reasoning_effort)。
           // 透传下去之后由 buildRequest 合并进请求体 —— 它放在最后合并,
           // 所以既覆盖厂商默认,又不用为每个厂商写分支。
           requestExtra: cfg.requestExtra,
-        }, {
-          // 第三个参数 thinking:true 表示这是「推理阶段」的增量(界面可弱化显示)
-          onDelta: (delta, full, thinking) => hooks.onThink?.(delta, full, thinking),
-        });
-        if (!res?.ok) throw new Error(res?.error || '请求失败');
+          omit: omit.length ? [...omit] : undefined,
+          }, {
+            // 第三个参数 thinking:true 表示这是「推理阶段」的增量(界面可弱化显示)
+            onDelta: (delta, full, thinking) => {
+              if (thinking) sawReasoning = true; else sawAnswer = true;
+              hooks.onThink?.(delta, full, thinking);
+            },
+          });
+          if (res?.ok) break;
+          const bad = unsupportedParamIn(res?.error);
+          if (bad && !omit.includes(bad) && omit.length < 3 && !externalSignal?.aborted) {
+            omit.push(bad);
+            continue;
+          }
+          throw new Error(res?.error || '请求失败');
+        }
+        if (omit.length) {
+          this.hooks.onError?.({
+            seat: this.seat,
+            message: `这个模型不认 ${omit.join(' / ')},已自动去掉后重试成功`,
+            level: 'info',
+          });
+        }
+        // 与 callLLMDirect 的判据保持一致(见那边的注释)
+        this.lastTruncated = (!sawAnswer && sawReasoning)
+          ? {
+            seat: this.seat, reason: 'length',
+            note: `模型把 ${cfg.maxTokens ?? '?'} 个 token 全用在推理上了,正式回答被截断`,
+            reasoningChars: (res.reasoning || '').length,
+            suggestedMaxTokens: Math.max(1200, (cfg.maxTokens || 300) * 3),
+          }
+          : null;
+        if (this.lastTruncated) this.hooks.onDebug?.(`[座位${this.seat + 1}] ${this.lastTruncated.note}`);
         return res.text || '';
       } finally {
         if (externalSignal) externalSignal.removeEventListener('abort', onAbort);
@@ -896,55 +1122,84 @@ class PokerAgent {
       if (externalSignal.aborted) controller.abort();
       else externalSignal.addEventListener('abort', onExternalAbort, { once: true });
     }
-    const kind = cfg.kind || 'openai';
-    const headers = { 'Content-Type': 'application/json' };
-    let url = cfg.endpoint;
-    let body;
-    if (kind === 'anthropic') {
-      headers['x-api-key'] = cfg.apiKey;
-      headers['anthropic-version'] = '2023-06-01';
-      body = {
-        model: cfg.model, max_tokens: cfg.maxTokens ?? 300, temperature: cfg.temperature ?? 1.1,
-        system, messages: [{ role: 'user', content: user }], stream: true,
-      };
-    } else if (kind === 'gemini') {
-      url = `${String(cfg.endpoint).replace(/\/+$/, '')}/models/${encodeURIComponent(cfg.model)}:streamGenerateContent?alt=sse&key=${encodeURIComponent(cfg.apiKey)}`;
-      body = {
-        systemInstruction: { parts: [{ text: system }] },
-        contents: [{ role: 'user', parts: [{ text: user }] }],
-        generationConfig: { temperature: cfg.temperature ?? 1.1, maxOutputTokens: cfg.maxTokens ?? 300 },
-      };
-    } else {
-      headers.Authorization = `Bearer ${cfg.apiKey}`;
-      body = {
-        model: cfg.model,
-        messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
-        temperature: cfg.temperature ?? 1.1, max_tokens: cfg.maxTokens ?? 300, stream: true,
-      };
-    }
-    // 厂商特有的请求参数(例如 deepseek 的 reasoning_effort、重试时关掉推理通道)。
-    //
-    // ⚠️ 上面几段是**手工拼的**请求体,所以必须在这里补一次合并。而且要
-    //    和 buildRequest 的 `spec.requestExtra || provider.requestExtra`
-    //    **对齐**:只认 cfg.requestExtra 的话,厂商级默认值在 Node 环境
-    //    (测试、命令行工具、离线兜底)会静默失效 —— 变成
-    //    「测试通过、线上却截断」这种最难查的偏差。
-    let extra = cfg.requestExtra;
-    if (!extra && cfg.provider) {
-      try {
-        // 缓存一下,别每次决策都重新 import
-        sharedProvidersMod = sharedProvidersMod || await import('../shared/providers.mjs');
-        extra = sharedProvidersMod.getProvider(cfg.provider)?.requestExtra;
-      } catch { /* 拿不到就用厂商请求体原样发,不影响功能 */ }
-    }
-    if (extra && typeof extra === 'object') Object.assign(body, extra);
-    try {
-      const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: controller.signal });
 
-      if (!res.ok) {
-        const errText = await res.text().catch(() => '');
-        throw new Error(`接口返回 ${res.status}: ${errText.slice(0, 180)}`);
+    /**
+     * ⚠️ 请求体和 SSE 解析**必须**走 shared/llmStream.mjs,不要在这里手写。
+     *
+     * 这里原来是一份手工复制的 buildRequest + parseSsePayload。后果很严重:
+     * 参数降级/协议支持只加到其中一条路径上时,另一条路径静默不变 ——
+     * 于是「Node 测试全绿、游戏里照样失败」(真的发生过:降级只加在了这份
+     * 只有测试才走的代码里,而网页版/桌面版走 api.llmChat)。
+     * 现在两条路径共用同一份构造与解析,只有「谁去发这个请求」不同。
+     */
+    sharedStreamMod = sharedStreamMod || await import('../shared/llmStream.mjs');
+    sharedProvidersMod = sharedProvidersMod || await import('../shared/providers.mjs');
+    const provider = sharedProvidersMod.getProvider(providerIdOf(cfg)) || {};
+    const built = sharedStreamMod.buildRequest({
+      kind: cfg.kind,
+      endpoint: cfg.endpoint,
+      apiKey: cfg.apiKey,
+      model: cfg.model,
+      system,
+      user,
+      temperature: cfg.temperature,
+      maxTokens: cfg.maxTokens,
+      // 推理档位与网页版/桌面版走同一个字段(见 callLLM 里那段说明)。
+      // 这里漏掉的话,Node 路径(测试、脚本)与线上就不是同一份报文了。
+      reasoningLevel: cfg.reasoningLevel,
+      requestExtra: cfg.requestExtra,
+    }, provider);
+    if (built.error) throw new Error(built.error);
+    const { url, headers, body: baseBody, kind } = built;
+
+    /**
+     * 发送 —— 带**参数降级重试**。
+     *
+     * 有些模型(尤其中转站后面的 o 系列 / gpt-5 系列)不认 temperature / max_tokens,
+     * 会直接回 400。摘掉那个字段再发一次通常就通了,而且不影响别的模型。
+     * 最多降级两次,避免拿坏请求死循环。
+     *
+     * ⚠️ 摘参数用的是 buildRequest 的 omit(而不是在这里 delete),
+     *    这样「同义字段一起摘」的规则也只有一份 —— 手写 delete 时漏掉
+     *    max_completion_tokens / max_output_tokens 是踩过的坑。
+     */
+    const dropped = [];
+    let res;
+    for (let attempt = 0; ; attempt++) {
+      const spec = {
+        kind: cfg.kind, endpoint: cfg.endpoint, apiKey: cfg.apiKey, model: cfg.model,
+        system, user, temperature: cfg.temperature, maxTokens: cfg.maxTokens,
+        // ⚠️ 降级重试这条路也要带上档位,否则「重试时报文与首次不同」——
+        //    推理块会因为漏传档位而凭空消失,测试看起来「降级成功」,
+        //    实际测的是另一份报文(这个仓库已经栽过两次「两条路径各写一份」)。
+        reasoningLevel: cfg.reasoningLevel,
+        requestExtra: cfg.requestExtra, omit: dropped.length ? [...dropped] : undefined,
+      };
+      const sent = dropped.length ? sharedStreamMod.buildRequest(spec, provider) : built;
+      res = await fetch(sent.url || url, {
+        method: 'POST', headers: sent.headers || headers,
+        body: JSON.stringify(sent.body || baseBody), signal: controller.signal,
+      });
+      if (res.ok) {
+        if (dropped.length) {
+          this.hooks.onError?.({
+            seat: this.seat,
+            message: `这个模型不认 ${dropped.join(' / ')},已自动去掉后重试成功`,
+            raw: '',
+            level: 'info',
+          });
+        }
+        break;
       }
+      const errText = await res.text().catch(() => '');
+      const bad = unsupportedParamIn(errText);
+      if (bad && !dropped.includes(bad) && dropped.length < 2 && attempt < 2) {
+        dropped.push(bad);
+        continue;
+      }
+      throw new Error(`接口返回 ${res.status}: ${errText.slice(0, 180)}`);
+    }
+    try {
       if (!res.body) throw new Error('接口没有返回流式内容');
 
       const reader = res.body.getReader();
@@ -953,6 +1208,11 @@ class PokerAgent {
       let full = '';
       let reasoning = '';
       let finishReason = '';
+      // 流里报出来的错误(共享解析器在 finish 事件上带出来的 error 字段)。
+      // 这里以前只取 c.finish、把 c.error 丢了 —— 「HTTP 200 + 流里报错」于是变成
+      // 「成功的空回答」,再经下面的 `full || reasoning` 兜底,最后表现成
+      // 「模型没给出可识别动作」这种完全不指向病因的结论。原文必须带上去。
+      let streamError = '';
 
       /**
        * 思考阶段的增量也要推给界面。
@@ -978,42 +1238,14 @@ class PokerAgent {
         const { done, value } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed.startsWith('data:')) continue;
-          const payload = trimmed.slice(5).trim();
-          if (!payload || payload === '[DONE]') continue;
-          let json;
-          try { json = JSON.parse(payload); } catch { continue; }
-
-          // 记录结束原因:length 表示被 max_tokens 截断了
-          const fr = json.choices?.[0]?.finish_reason || json.stop_reason
-            || json.candidates?.[0]?.finishReason;
-          if (fr) finishReason = String(fr);
-
-          let delta = '';
-          if (kind === 'anthropic') {
-            if (json.type === 'content_block_delta') {
-              if (json.delta?.type === 'text_delta') delta = json.delta.text || '';
-              else if (json.delta?.type === 'thinking_delta') {
-                const t = json.delta.thinking || '';
-                if (t) { reasoning += t; emitThink(t, true); }
-              }
-            }
-          } else if (kind === 'gemini') {
-            for (const p of json.candidates?.[0]?.content?.parts || []) delta += p.text || '';
-          } else {
-            const d = json.choices?.[0]?.delta || {};
-            if (d.reasoning_content) { reasoning += d.reasoning_content; emitThink(d.reasoning_content, true); }
-            delta = d.content || '';
-          }
-          if (delta) {
-            full += delta;
-            emitThink(delta, false);
-          }
-        }
+        // 解析交给共享实现 —— 它与网页版/桌面版走的是同一个函数,
+        // 新增协议(responses 等)只要改那一处,三条路径同时生效。
+        buffer = sharedStreamMod.consumeSseBuffer(buffer, kind, (c) => {
+          if (c.error) { streamError = String(c.error); return; }
+          if (c.phase === 'finish') { if (c.finish) finishReason = c.finish; return; }
+          if (c.phase === 'reasoning') { reasoning += c.reasoning; emitThink(c.reasoning, true); return; }
+          if (c.phase === 'answer') { full += c.text; emitThink(c.text, false); }
+        });
       }
 
       /**
@@ -1038,6 +1270,8 @@ class PokerAgent {
         this.hooks.onTruncated?.(this.lastTruncated);
         this.hooks.onDebug?.(`[座位${this.seat + 1}] ${note}`);
       }
+      // 流里报错就当失败抛出(原文带上),不能让下面那条兜底把错误吞成「有回答」
+      if (streamError) throw new Error(`上游流里报错:${streamError}`);
       // ⚠️ 这里 `|| reasoning` 是**有争议的兜底**:正式回答为空时把推理原文
       //    当答案交出去,调用方会拿英文散文去解析 JSON、失败后还可能从散文里
       //    猜出一个动作(实测猜出过 allin)。保留是为了还能抢救出一点信息,
