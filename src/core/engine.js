@@ -342,19 +342,31 @@ class PokerEngine {
   stackSituation(forSeat) {
     const st = this.state;
     const bb = Math.max(1, st.bigBlind);
-    // 「活着」= 还有筹码。筹码归零就是出局,不再参与后面的手牌。
-    const alive = st.players.filter((p) => p.stack > 0);
-    const sorted = [...alive].sort((a, b) => b.stack - a.stack);
+    // ⚠️ **不能只看 stack > 0 判断「还活着」**。
+    //    全下的玩家筹码也是 0,但他明明还在这一手里(还可能赢下底池)。
+    //    早期实现写成 `p.stack > 0 ? ... : 'out'`,于是全下的人被标成
+    //    「已出局(不再参与)」喂给了其他 AI —— 实测有 AI 在思考里纠结
+    //    「阿哲的筹码显示 0(0 个大盲,已出局)?这列表有点混乱」,
+    //    把整段推理浪费在这上面。
+    //    真正的出局是**结算后**:那时 stack 0 的人会被置 inHand = false
+    //    (见 _showdown/_settle)。所以判据是「stack 为 0 且不在这手牌里」,
+    //    与引擎自己的 seatedPlayers 保持同一个定义。
+    const alive = st.players.filter((p) => p.stack > 0 || p.inHand);
+    // 排名只按**手里还有筹码**的人算 —— 全下的人暂时没有筹码可比,
+    // 给个名次反而自相矛盾(「第 6 多」却只有 0 个大盲)。
+    const ranked = st.players.filter((p) => p.stack > 0).sort((a, b) => b.stack - a.stack);
     const rankOf = {};
-    sorted.forEach((p, i) => { rankOf[p.seat] = i + 1; });
+    ranked.forEach((p, i) => { rankOf[p.seat] = i + 1; });
     const per = {};
     for (const p of st.players) {
+      const isAllIn = p.stack <= 0 && p.inHand;   // 全下:钱在底池里,人还在
+      const isOut = p.stack <= 0 && !p.inHand;    // 真出局:筹码归零且已结算
       per[p.seat] = {
         seat: p.seat,
         stack: p.stack,
         bbCount: Math.round((p.stack / bb) * 10) / 10,
-        rank: rankOf[p.seat] || null,          // 筹码排名(1 = 最多);已出局为 null
-        status: p.stack > 0 ? PokerEngine.stackStatus(p.stack, bb) : 'out',
+        rank: rankOf[p.seat] || null,
+        status: isOut ? 'out' : (isAllIn ? 'allin' : PokerEngine.stackStatus(p.stack, bb)),
         isMe: p.seat === forSeat,
       };
     }
@@ -1217,8 +1229,10 @@ class PokerEngine {
       // 还有几个人活着 / 总共几个座位 —— 用来判断「离冠军多远」
       aliveCount: sit.aliveCount, totalSeats: sit.totalSeats,
       // 全场筹码排名一览(谁是筹码王、谁快死了)
+      // 全下的人也要列进来(stack 为 0,排在最后)—— 让他们从表里凭空消失
+      // 同样会让模型困惑(「刚才还有阿哲,怎么不见了」)。
       stackTable: st.players
-        .filter((p) => p.stack > 0)
+        .filter((p) => p.stack > 0 || p.inHand)
         .sort((a, b) => b.stack - a.stack)
         .map((p) => ({ seat: p.seat, name: p.name, ...sit.per[p.seat] })),
       position: this.positionLabels()[seat] || '?',

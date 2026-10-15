@@ -156,8 +156,16 @@ export class SceneTable {
     const baseResize = stage.resize;
     this.resize = () => {
       baseResize();
-      this.fitCamera();
-      // 座位半径跟画面宽度有关(窄屏要往中间收),所以窗口变化时要重排一次
+      // 统一视口尺寸的来源:拉伸和取景都用**canvas 的真实宽高比**。
+      // 别让两边各自去读 window —— 移动端首帧 canvas 还没尺寸时,
+      // 两边读到的可能不一样(实测:桌子没拉长、镜头却被拉得很远)。
+      const w = this.canvas.clientWidth || window.innerWidth || 1440;
+      const h = this.canvas.clientHeight || window.innerHeight || 800;
+      const aspect = Math.max(0.6, w / Math.max(1, h));
+      // 先让桌子按新视口重算拉伸(长桌),再取景 —— 顺序反了相机会按旧尺寸算
+      this.table.layoutTable?.(aspect);
+      this.fitCamera(aspect);
+      // 座位半径跟画面宽度有关(窄屏要往中间收,宽屏拉长),所以窗口变化时要重排一次
       if (this.plates.size) {
         this.table.buildSeats(this.plates.size);
         this.table.resync?.();
@@ -166,7 +174,11 @@ export class SceneTable {
 
     addRoom(this.scene);
     addLights(this.scene);
-    this.table = new Table3D(this.scene, { getPersona: (seat) => hooks.getPersona?.(seat) });
+    this.table = new Table3D(this.scene, {
+      getPersona: (seat) => hooks.getPersona?.(seat),
+      // 2D 立绘由「该座位用的模型」决定,所以要把解析结果透传下去
+      getPortrait: (seat) => hooks.getPortrait?.(seat),
+    });
 
     this.dom = {
       topbar: root.querySelector('.topbar'),
@@ -210,16 +222,42 @@ export class SceneTable {
   }
 
   /** 窄窗口时把相机往后拉一点,保证整张桌子都在画面里(名牌也不会挤在一起) */
-  fitCamera() {
+  fitCamera(aspectIn) {
     const w = this.canvas.clientWidth || window.innerWidth;
     const h = this.canvas.clientHeight || window.innerHeight;
-    const aspect = Math.max(0.6, w / Math.max(1, h));
+    // 优先用调用方传进来的(fresh)宽高比,保证与 layoutTable 用的是同一个数
+    const aspect = Number.isFinite(aspectIn) && aspectIn > 0
+      ? aspectIn : Math.max(0.6, w / Math.max(1, h));
     const ref = 1.56;                                  // 参考宽高比
     // 座位跟着人数外扩,相机也要相应后退,不然最外侧的人会被裁掉
     const seats = this.plates.size || 6;
     const spread = 0.9 + seats * 0.028;
-    const k = Math.min(1.5, Math.max(1, Math.sqrt(ref / aspect))) * spread;
-    this.camBaseY = 4.3 * k;
+    let k = Math.min(1.5, Math.max(1, Math.sqrt(ref / aspect))) * spread;
+
+    /**
+     * 横向也要装得下。
+     *
+     * 垂直视野固定(40°),所以宽屏时可见**宽度** = 高度 × aspect —— 理论上很宽。
+     * 但牌桌在宽屏下会被拉长成长桌(见 table3d 的 stretchFor),两侧的人跟着外移,
+     * 所以不能只看垂直:必须确认「最外侧座位 + 人物半宽」仍在水平视野内。
+     *
+     * 这里按 pinhole 模型反推需要的 z:
+     *   可见半宽 = camZ × tan(fovY/2) × aspect
+     * 不足就把相机沿原方向后退(按同一比例缩放 y,保持俯角不变)。
+     */
+    const half = this.table?.outerHalfWidth?.() || 0;
+    if (half > 0) {
+      const halfFovY = (this.camera.fov * Math.PI / 180) / 2;
+      const needZ = half / (Math.tan(halfFovY) * aspect);
+      if (needZ > 8.4 * k) k = needZ / 8.4;
+    }
+
+    // 桌子被拉长(长桌)时把相机抬高一点 —— 视角更接近俯视,
+    // 桌子的近侧桌沿在屏幕上就不会横扫那么宽,两端的人不容易压到桌面上。
+    const stretch = this.table?.stretchX || 1;
+    const lift = 1 + Math.max(0, stretch - 1) * 0.45;
+
+    this.camBaseY = 4.3 * k * lift;
     this.camBaseZ = 8.4 * k;
     this.camera.aspect = aspect;
     this.camera.updateProjectionMatrix();
@@ -233,6 +271,23 @@ export class SceneTable {
     const t = this._clock.elapsedTime;
     void dt;
 
+    /**
+     * 布局自愈:每帧比一下 canvas 的真实尺寸,变了就重排。
+     *
+     * 为什么需要:移动端(尤其带动态地址栏的浏览器)首帧 canvas 常常还没有
+     * 真实尺寸,那时算出来的**拉伸系数和相机距离都是错的**;而 resize 事件
+     * 不一定会在尺寸稳定后补发一次。用户实测到的现象就是
+     * 「桌子没被拉长、镜头却被拉得很远」—— 一次算错就永久留着了。
+     * 每帧比一次尺寸是最省事也最稳的兜底(尺寸没变时只是一次属性读取)。
+     */
+    {
+      const cw = this.canvas.clientWidth, ch = this.canvas.clientHeight;
+      if (cw > 0 && ch > 0 && (cw !== this._lastW || ch !== this._lastH)) {
+        this._lastW = cw; this._lastH = ch;
+        this.resize();
+      }
+    }
+
     // 相机轻微呼吸感,让画面不像静止图片
     if (!this.camBaseY) this.fitCamera();
     if (!this._frozen) {
@@ -242,6 +297,10 @@ export class SceneTable {
     }
     // 发牌 / 飞牌动画:每帧推进一次(内部自己清理已结束的,不会越积越多)
     updateCardAnimations(performance.now());
+    // 座位整体正对相机(人物 + 椅子 + 头顶标记)。
+    // 必须每帧做:相机有呼吸动画(上面刚改过 position.y 并 lookAt),不是静止的。
+    // 注意是 faceSeats 而不是只转立绘 —— 只转立绘会让椅子和人物错开,见它的注释。
+    this.table.faceSeats?.(this.camera);
     this._projectPlates(Math.min(0.05, dt || 0.016));
     // 玩家模式:下注条的位置跟着底部两条的实际布局走
     if (this.mode === 'player') this.layoutPlayerBar();
@@ -328,15 +387,24 @@ export class SceneTable {
         ? `<span class="handrow__delta ${delta.delta > 0 ? 'is-up' : delta.delta < 0 ? 'is-down' : ''}">${delta.delta > 0 ? '+' : ''}${fmt(delta.delta)}</span>`
         : '';
 
+      // accent 色点:立绘由模型决定,同一个模型被多个座位用到时立绘一样,
+      // 光看牌桌分不清谁是谁 —— 这枚小圆点用的是该座位立绘的 accent 色,
+      // 和人物脚下的圈同色,对着看一眼就能对上号。
+      const accent = this.table?.hooks?.getPortrait?.(p.seat)?.accent || '';
+      const dot = accent
+        ? `<i class="handrow__dot" style="background:${accent}" title="立绘色调"></i>`
+        : '';
+
       parts.push(`
         <div class="handrow handrow--${state}" data-seat="${p.seat}">
           <div class="handrow__who">
+            ${dot}
             <span class="plate__name">${persona?.name || p.name || `座位${p.seat + 1}`}</span>
             ${pos ? `<span class="posbadge ${posCls}">${pos === 'BTN' ? 'D' : pos}</span>` : ''}
           </div>
           <div class="handrow__cards">${cardsHtml}</div>
           <div class="handrow__meta">
-            <span class="handrow__stack">${fmt(p.stack)}</span>
+            <span class="handrow__stack">${p.allIn || (p.stack <= 0 && p.inHand) ? '全下' : fmt(p.stack)}</span>
             ${deltaTxt}
             ${p.lastAction?.label && !view.handOver ? `<span class="handrow__act">${p.lastAction.label}</span>` : ''}
           </div>

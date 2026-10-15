@@ -17,6 +17,14 @@ const DEFAULT_CONFIG = {
   keys: {},                 // { deepseek: 'sk-...', openrouter: 'sk-or-...' }
   seatProviders: {},        // { '0': 'deepseek', '1': 'groq' } 不填则跟随默认
   seatModels: {},           // { '0': 'deepseek-chat', '2': 'llama-3.1-8b-instant' }
+  // 逐座位的性格(决定打法)。留空 = 随机分配。
+  // 与座位显示名无关 —— 名字跟着模型走(相同模型自动加序号)。
+  seatPersonas: {},         // { '0': 'nit', '1': 'maniac' }
+  // ── 自定义中转站(OpenAI 兼容)─────────────────────────────
+  // 中转站的特点:**一个地址 + 多个 Key**,每个 Key 能调的模型不一定相同。
+  customEndpoint: '',       // 完整地址,例如 https://中转站/v1/chat/completions
+  customKeys: [],           // [{ id: 'k1', label: 'Key 1', key: 'sk-...' }]
+  seatCustomKeys: {},       // { '0': 'k1' } 座位用哪个 Key;不填 = 第一个
   endpoint: 'https://api.deepseek.com/chat/completions',
   apiKey: '',
   model: 'deepseek-chat',
@@ -45,10 +53,18 @@ const DEFAULT_CONFIG = {
   },
 };
 
+/**
+ * 深合并配置补丁。
+ *
+ * `null` 表示**删除这个键** —— 这是必要的:像 seatPersonas 这种「按座位覆盖」
+ * 的字典,用户把某个座位改回「随机」时得能把那一条删掉。如果只是合并,
+ * 空对象不会删任何东西,那一条会一直留着,用户就再也回不到随机了。
+ */
 function deepMerge(base, extra) {
   if (!extra || typeof extra !== 'object') return base;
   const out = Array.isArray(base) ? [...base] : { ...base };
   for (const [k, v] of Object.entries(extra)) {
+    if (v === null) { delete out[k]; continue; }          // null = 显式删除
     if (v && typeof v === 'object' && !Array.isArray(v) && base?.[k] && typeof base[k] === 'object') {
       out[k] = deepMerge(base[k], v);
     } else if (v !== undefined) {

@@ -20,10 +20,17 @@ shots/
 # ---------------------------------------------------------------
 # 测试 / 审查 / 诊断脚本不入库(体积大、只对开发有用)
 #
-# 只保留「运行与发布」真正需要的那三个:
-#   buildweb.mjs     构建浏览器版到 web/dist
-#   buildworker.mjs  构建 Cloudflare Worker 到 worker/dist
-#   webserve.mjs     本地起一个静态服务器预览浏览器版
+# 保留两类:
+#   1) 「运行与发布」需要的:
+#        buildweb.mjs     构建浏览器版到 web/dist
+#        buildworker.mjs  构建 Cloudflare Worker 到 worker/dist
+#        webserve.mjs     本地起一个静态服务器预览浏览器版
+#   2) 「素材流水线」—— 立绘是生成出来的,没有这两个脚本别人拿到仓库
+#      没法复现(SOURCES.md / MANUAL-SOURCES.md 里也引用了它们):
+#        fetchportraits.mjs       从 crosspet 取 6 套立绘
+#        prepmanualportraits.mjs  处理手工素材(白底抠图 → WebP)
+#        _webpsize.mjs            fetchportraits 依赖它读 WebP 尺寸
+#
 # 其余(audit_* / *test* / *check* / 各种 sweep、diag、probe)全部忽略。
 # 想恢复某个脚本,在下面加一行 `!tools/xxx.mjs` 即可。
 # ---------------------------------------------------------------
@@ -31,3 +38,12 @@ tools/*
 !tools/buildweb.mjs
 !tools/buildworker.mjs
 !tools/webserve.mjs
+!tools/fetchportraits.mjs
+!tools/prepmanualportraits.mjs
+!tools/_webpsize.mjs
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
+!.env.example

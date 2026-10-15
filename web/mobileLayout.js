@@ -70,16 +70,34 @@ function syncPlayerBarAnchor() {
     root.style.removeProperty('--pbar-bottom');
     return;
   }
+
+  // 先量底部操作条的真实高度并写进 --actionbar-h。
+  // 手牌一览的 bottom 就是靠它让开操作条的(mobile.css 里是
+  // calc(var(--actionbar-h) + 6px))—— 写死数字迟早会对不上,
+  // 因为操作条里的按钮在手机上会被压扁、在玩家模式下还会藏掉两个。
+  const ab = document.querySelector('.actionbar');
+  if (ab) {
+    const h = Math.round(ab.getBoundingClientRect().height);
+    if (h > 0) root.style.setProperty('--actionbar-h', `${h}px`);
+  }
+
   const compact = isCompactViewport();
   if (!compact) {
     // 大屏交回给 CSS 里的桌面值
     root.style.removeProperty('--pbar-bottom');
     return;
   }
-  const h = strip.getBoundingClientRect().height;
+
+  // ⚠️ 这里必须**量**手牌一览离底边多远,不能写死 8px。
+  //    以前写死 8(因为那时 CSS 是 bottom:8px),后来手牌一览要
+  //    让开操作条、bottom 变成 calc(--actionbar-h + 6px),
+  //    写死的 8 就让下注条压在牌面上。
+  //    (读 rect 会强制刷新布局,所以上面刚写的 --actionbar-h 已经生效。)
+  const rect = strip.getBoundingClientRect();
   const viewportH = window.innerHeight;
-  // 手牌一览以 bottom:8px 贴着底边,所以它占掉的高度是 (h + 8) + 一点间距
-  const bottom = Math.round(h + 8 + 6);
+  const stripBottomOffset = Math.max(0, viewportH - rect.bottom);
+  // 手牌一览占掉的高度 = 它自己的高 + 它离底边的距离,再加一点间距
+  const bottom = Math.round(rect.height + stripBottomOffset + 6);
   // 别把操作条顶到顶栏上面去(顶栏约 44px,再留 8px 呼吸)
   const maxBottom = Math.max(60, viewportH - 56 - 70);
   root.style.setProperty('--pbar-bottom', `${-Math.min(bottom, maxBottom)}px`);

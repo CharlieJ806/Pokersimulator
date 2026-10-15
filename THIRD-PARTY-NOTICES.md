@@ -1,6 +1,41 @@
 # 第三方素材与许可声明
 
-本项目的界面素材分两部分:**程序自绘**(无第三方权利)和**预生成的开源头像**。
+本项目的界面素材分四部分:**程序自绘**(无第三方权利)、**预生成的开源头像**、
+**角色立绘**(CC BY-NC-SA 4.0,见第 0 节 —— 注意它比本项目代码的许可更严)、
+以及调研记录。
+
+---
+
+## 0. 角色立绘 —— CrossPet(**CC BY-NC-SA 4.0**)
+
+> ⚠️ **这一节的许可与仓库根的 MIT 不同,而且更严格。**
+> 只要分发包含这些立绘的版本,就必须遵守下面的三条。
+
+座位上的 2D 立绘取自开源项目 **CrossPet**:
+
+- 仓库:<https://github.com/lokicorvus/crosspet>(目录 `characters/`)
+- 取用范围:6 个角色 × 5 个状态(idle / thinking / happy / oops / surprised),共 30 张
+- 取图流程:`tools/fetchportraits.mjs`
+- 本地完整说明:`assets/portraits/SOURCES.md`、`assets/portraits/LICENSE.md`(原许可原文)
+
+**许可:CC BY-NC-SA 4.0**(署名 — 非商业性使用 — 相同方式共享 4.0 国际)
+
+| 条款 | 对本项目的要求 |
+| --- | --- |
+| **署名** | 必须注明 CrossPet 及各角色原设定作者(见下) |
+| **非商业性** | **不得用于商业目的** —— 不能卖、不能挂广告、不能作为付费产品的一部分 |
+| **相同方式共享** | 包含这些立绘的衍生作品也必须以 CC BY-NC-SA 4.0 发布 |
+
+**署名**:立绘与角色设定由 CrossPet 及其社区作者创作 ——
+DeepSeek「溟月」(上善无形)、深蓝女仆鲸鱼娘 / GPT「御姐白龙」(B 站 ZipZipPipe)、
+Gemini 娘、Claude 娘等社区设定。逐角色的来源见 `assets/portraits/LICENSE.md`。
+
+**商标**:「Claude」「GPT」「ChatGPT」「DeepSeek」「Gemini」是各自公司的商标。
+CrossPet 与本项目均为**非官方同人项目**,与这些公司无关。
+
+**角色映射**:座位显示哪套立绘由该座位使用的**模型**决定(见 `src/ai/portraits.js`);
+认不出的模型使用**本项目自绘**的通用占位立绘(`portraits2d.js` 里的 canvas 绘制),
+不冒用任何厂商形象。
 
 ---
 

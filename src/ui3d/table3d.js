@@ -20,7 +20,7 @@
 
 import * as THREE from '../../vendor/three.module.js';
 import { PALETTE } from './scene.js';
-import { createCharacter, setCharacterPose, CHAR_SCALE } from './characters3d.js';
+import { createPortrait, setCharacterPose, setPortraitCharacter, facePortrait, CHAR_SCALE } from './portraits2d.js';
 import {
   createCardMesh, setCardFace, createChipStack, scatterChips, CARD_SCALE,
   flyCard, hasCardAnimations, clearCardAnimations, flyChips,
@@ -28,19 +28,95 @@ import {
 
 const SEAT_RX = 3.05;     // 座位椭圆半径 x(会按人数放大)
 const SEAT_RZ = 2.45;     // 座位椭圆半径 z
-const TABLE_R = 2.62;     // 桌面半径
+const TABLE_R = 2.30;     // 桌面半径
+                          // 原来 2.62 —— 桌沿离座位太近,俯视下两侧的人会压到绿色桌面上
+                          // (用户反馈「人在桌子上」)。收小桌面等于给人和桌子之间
+                          // 让出一道可见的空隙,比把座位往外推更划算:往外推会让
+                          // 相机跟着后退,整体反而变小。
+
+/**
+ * 座位椭圆:座位圈用的半轴。
+ * x 方向额外乘一个拉伸系数(长桌),见 stretchFor。
+ */
+const seatAxes = (count, stretch) => ({
+  a: SEAT_RX * spreadFor(count) * (stretch || 1),
+  b: SEAT_RZ * spreadFor(count),
+});
+
+/**
+ * 在座位椭圆上按**弧长**等分,返回第 seat 个座位的参数角。
+ *
+ * ⚠️ 不能用「角度等分」。椭圆上角度等分时,越靠近两端 cos 变化越慢,
+ *    相邻座位的**实际间距**会明显变小 —— 看起来就是「两侧挤成一堆、
+ *    中间又空着」(用户反馈「分布过于紧张」)。
+ *    按弧长等分才能让每个人之间的间距在视觉上一致。
+ *
+ * 做法:细密采样求累计弧长表,再按比例反查角度。一次几毫秒,
+ * 而且只在建座位/改视口时跑,不在渲染循环里。
+ */
+function seatAngleByArc(seat, count, a, b, a0, a1) {
+  if (count <= 1) return Math.PI * 1.5;
+  const N = 240;
+  const cum = new Float64Array(N + 1);
+  let prevX = a * Math.cos(a0), prevY = b * Math.sin(a0);
+  for (let i = 1; i <= N; i++) {
+    const th = a0 + ((a1 - a0) * i) / N;
+    const x = a * Math.cos(th), y = b * Math.sin(th);
+    cum[i] = cum[i - 1] + Math.hypot(x - prevX, y - prevY);
+    prevX = x; prevY = y;
+  }
+  const total = cum[N];
+  if (total <= 0) return a0;
+  const want = (total * seat) / (count - 1);
+  // 在累计表里找第一个 ≥ want 的采样点,再线性插值
+  let lo = 0, hi = N;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (cum[mid] < want) lo = mid + 1; else hi = mid; }
+  const i = Math.max(1, lo);
+  const seg = cum[i] - cum[i - 1];
+  const t = seg > 0 ? (want - cum[i - 1]) / seg : 0;
+  return a0 + ((a1 - a0) * (i - 1 + t)) / N;
+}
 const RAIL_OUTER_R = 2.95; // 包边外沿(座位必须在它之外,否则身体会埋进桌子)
 
 /**
  * 人越多坐得越开。
  *
  * 这些数字是按几何算出来的,不是估的:
- *   角色躯干世界半宽 = 0.79(见 characters3d.js 的 CHAR_SCALE),躯干最内侧要落在
+ *   角色躯干世界半宽 = 0.79(见 portraits2d.js 的 CHAR_SCALE),躯干最内侧要落在
  *   包边外沿(2.95)之外。中间那两个座位正对圆心,座位半径 ≈ 2.45 × spread,
  *   所以 spread ≥ (2.95 + 0.79) / 2.45 ≈ 1.53。左右两侧的座位约束更松,这里统一取保守值。
  */
-const SEAT_SPREAD = { 2: 1.22, 3: 1.22, 4: 1.22, 5: 1.22, 6: 1.24, 7: 1.30, 8: 1.38, 9: 1.48 };
+/**
+ * 每多一个人,座位圈外扩多少。
+ *
+ * ⚠️ 这些数字不能只按「坐得下」给,要按「**相邻两人不重叠**」给:
+ *    立绘宽约 1.9 世界单位,排在椭圆上时相邻间距 = 弧长 / (人数-1)。
+ *    实测 8 人用旧的 1.38 时弧长约 10.4,相邻只有 1.49 —— 人和人叠在一起
+ *    (用户反馈「人物角色还是太密集」)。现在按 1.9 宽的立绘 + 一点缝反推,
+ *    8 人给到 1.80。
+ */
+const SEAT_SPREAD = { 2: 1.30, 3: 1.34, 4: 1.44, 5: 1.56, 6: 1.68, 7: 1.74, 8: 1.80, 9: 1.88 };
 const spreadFor = (n) => SEAT_SPREAD[Math.max(2, Math.min(9, n))] ?? 1.58;
+
+/** faceSeats 每帧复用,避免每座位新建 Vector3 */
+const _seatWorld = new THREE.Vector3();
+
+/**
+ * 宽屏时把牌桌拉长成**椭圆(长桌)**,把左右两侧浪费掉的空间用起来。
+ *
+ * @param {number} aspect 视口宽高比。**必须由调用方传真实的 canvas 宽高比** ——
+ *   不要在这里读 window.innerWidth/Height:移动端首帧 canvas 往往还没有真实尺寸,
+ *   读到的是错的,而错的结果会被一直留着(用户实测:桌子没被拉长、镜头还被拉远)。
+ */
+function stretchFor(aspect) {
+  const a = Number.isFinite(aspect) && aspect > 0 ? aspect : 1.6;
+  // 1.5 及以下不拉;2.4 及以上拉到最大
+  const t = Math.max(0, Math.min(1, (a - 1.5) / 0.9));
+  // ⚠️ 别拉太狠。拉得越长,桌子的**近侧桌沿**在屏幕上扫过的宽度越大
+  //    (它离相机近、被放大),两端座位就会投影进绿色桌面里。
+  //    0.35(最多 1.35 倍)是「用上左右空间」与「人别压在桌面上」之间的平衡点。
+  return 1 + t * 0.35;
+}
 
 /* ------------------------------------------------------------ 桌面贴图 */
 
@@ -200,6 +276,10 @@ export class Table3D {
 
     this.table = makeTable();
     this.root.add(this.table);
+    // 宽屏拉长(见 stretchFor 的注释)。先按当前视口算一次,
+    // 之后 resize 时由 layoutTable() 更新。
+    this.stretchX = stretchFor(1.6);
+    this.layoutTable(1.6);
 
     this.seats = new Map();       // seat -> {char, holeCards, betChips, stackChips, anchor}
     this.holeGroups = new Map();
@@ -277,24 +357,67 @@ export class Table3D {
 
   /* ---------------- 座位 ---------------- */
 
+  /**
+   * 按当前视口重算桌子的横向拉伸,并应用到桌子与座位圈。
+   * 视口变化(旋转屏幕 / 拖窗口)时由 sceneFull 调用。
+   *
+   * @returns {boolean} 拉伸系数是否变了(变了就需要重建座位)
+   */
+  layoutTable(aspect) {
+    const next = stretchFor(aspect);
+    const changed = Math.abs(next - (this.stretchX || 1)) > 0.001;
+    this.stretchX = next;
+    // 桌面整体沿 X 拉长 → 圆桌变椭圆长桌
+    this.table.scale.set(next, 1, 1);
+    return changed;
+  }
+
+  /**
+   * 最外侧座位离中轴有多远(含人物半宽)。
+   * 供相机取景判断「横向装不装得下」—— 宽屏把桌子拉长之后,
+   * 两侧的人会更靠外,相机必须相应后退,否则最外侧的人被裁掉。
+   *
+   * ⚠️ 余量要按**最宽的立绘**算。立绘是 billboard(正面朝相机),
+   *    它在屏幕上的横向占位就是自己的宽度,不是旧 3D 角色那种窄躯干。
+   *    实测世界宽度约 1.9(如 grok,长宽比 1.02),半宽 ≈ 0.95;
+   *    第一版只留 1.15,结果最外侧两个人的手臂被画面边缘切掉。
+   */
+  outerHalfWidth() {
+    const n = Math.max(2, this.plates?.size || 6);
+    const k = spreadFor(n);
+    const x = SEAT_RX * k * (this.stretchX || 1);
+    return x + 1.55;      // 半宽 0.95 + 两侧呼吸余量
+  }
+
   seatTransform(seat, count) {
     // 荷官在 +z(靠画面这一侧);牌手全部放在对面半圈(角度 π ~ 2π,即 z < 0 那一侧),
     // 所以绝不会有人坐到相机旁边。人越多,半径放得越大,坐得越松散。
-    const a0 = Math.PI + 0.04;
-    const a1 = Math.PI * 2 - 0.04;
-    const angle = count <= 1 ? Math.PI * 1.5 : a0 + (seat * (a1 - a0)) / (count - 1);
+    //
+    // ⚠️ 弧线**不能铺满 180°**。铺满时两端正好落在桌子的侧腰(z ≈ 0):
+    //    相机是俯视的,那两个座位虽然几何上在桌子外面(x 超出桌宽),
+    //    投影到屏幕上却落进绿色桌面范围内 —— 看起来就是「左右两边的人
+    //    坐在桌子上」(用户反馈)。收窄到约 136° 之后,两端落到 z 明显为负的
+    //    位置,所有人都在桌子**后方**,俯视下不再压到桌面。
+    const ARC = 0.38;                       // 两端各收这么多弧度
+    const a0 = Math.PI + ARC;
+    const a1 = Math.PI * 2 - ARC;
     const k = spreadFor(count);
+    // 按**弧长**等分,而不是按角度等分(见 seatAngleByArc 的注释)
+    const axes = seatAxes(count, this.stretchX || 1);
+    const angle = seatAngleByArc(seat, count, axes.a, axes.b, a0, a1);
 
-    // 画面窄的时候把座位往中间收一点,否则最外侧的人会被裁出画面
+    // 画面很窄时把座位往中间收一点,否则最外侧的人会被裁出画面
     const vw = (typeof window !== 'undefined' && window.innerWidth) || 1440;
     const narrow = Math.max(0, Math.min(1, (1440 - vw) / 300));   // 1440 宽时 0,1140 宽及以下时 1
     const squeeze = 1 - narrow * 0.45;
+    // 宽屏则反向拉长(长桌)。两者不会同时显著生效:窄屏 aspect 小 → stretchX≈1。
+    const stretch = this.stretchX || 1;
 
     return {
       angle,
-      x: Math.cos(angle) * SEAT_RX * k * squeeze,
+      x: Math.cos(angle) * SEAT_RX * k * squeeze * stretch,
       z: Math.sin(angle) * SEAT_RZ * k,
-      innerX: Math.cos(angle) * (TABLE_R + 0.5),
+      innerX: Math.cos(angle) * (TABLE_R + 0.5) * stretch,
       innerZ: Math.sin(angle) * (TABLE_R + 0.5),
     };
   }
@@ -341,15 +464,14 @@ export class Table3D {
     this.stackChips.clear();
     this.revealed.clear();
 
-    const bodyTypes = ['average', 'slim', 'stout'];
     for (let seat = 0; seat < count; seat++) {
-      const persona = this.hooks.getPersona?.(seat);
-      const seed = (persona?.id || 'x').length * 3 + seat * 5 + 1;
-      const char = createCharacter({
-        seed,
-        body: bodyTypes[(seat + seed) % bodyTypes.length],
-        shirt: persona?.shirt3d,
-        scale: 1,
+      // 立绘由**该座位用的模型**决定(见 ai/portraits.js 的映射规则),
+      // 而不是由性格决定 —— 性格只影响 accent 色调和名字。
+      const portrait = this.hooks.getPortrait?.(seat) || {};
+      const char = createPortrait({
+        charId: portrait.charId,
+        accent: portrait.accent,
+        state: 'idle',
       });
       const t = this.seatTransform(seat, count);
 
@@ -892,6 +1014,48 @@ export class Table3D {
       out.set(seat, new THREE.Vector3(c.x, box.max.y, c.z));
     }
     return out;
+  }
+
+  /**
+   * 让**整个座位**一起正对相机:人物 + 椅子 + 头顶标记。
+   *
+   * ⚠️ 为什么必须连椅子一起转,而不能只转立绘:
+   *    立绘是 billboard(正面朝**相机**),而椅子原先固定在「朝向**桌心**」的方位上。
+   *    对正对相机的座位这两个方向一致,看不出问题;但对**两侧**的座位
+   *    它们差将近 90° —— 椅子会被甩到人物旁边斜着支出去,
+   *    看起来就是「人没坐在椅子上 + 椅子穿出人物」(用户反馈的错位/穿模)。
+   *
+   *    把整个 rig 转过来之后:rig 的 +z 指向相机,那么 rig 局部 -z
+   *    正好是「人物背后」,而椅子本来就摆在局部 -z(= 后靠背方向),
+   *    于是「坐在椅子上」由结构自洽保证,不再依赖两套方位碰巧一致。
+   *
+   * 由 sceneFull 的渲染循环**每帧**调用 —— 相机有呼吸动画,不是静止的。
+   */
+  faceSeats(camera) {
+    if (!camera) return;
+    for (const s of this.seats.values()) {
+      if (!s.rig) continue;
+      s.rig.getWorldPosition(_seatWorld);
+      s.rig.rotation.y = Math.atan2(camera.position.x - _seatWorld.x, camera.position.z - _seatWorld.z);
+    }
+  }
+
+  /** 让所有立绘正对相机。由 sceneFull 的渲染循环**每帧**调用 ——
+      相机有呼吸动画,只在创建时算一次朝向会在动画中歪掉。 */
+  facePortraits(camera) {
+    for (const s of this.seats.values()) if (s.char) facePortrait(s.char, camera);
+  }
+
+  /**
+   * 套用最新的立绘分配(不改座位结构)。
+   * 用户在「模型」面板里换了某个座位的模型时用这个 —— 立刻换立绘,
+   * 不用等重开一局。
+   */
+  applyPortraits() {
+    for (const [seat, s] of this.seats) {
+      const p = this.hooks.getPortrait?.(seat);
+      if (p && s.char) setPortraitCharacter(s.char, p.charId, p.accent);
+    }
   }
 
   /** 实时取某个座位的头顶位置(思考气泡每帧用这个,避免用过期缓存) */

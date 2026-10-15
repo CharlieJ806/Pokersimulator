@@ -20,25 +20,26 @@ main = "index.js"
 compatibility_date = "2024-11-01"
 
 # ─────────────────────────────────────────────────────────────
-# 自定义域名(可选)
+# 自定义域名
 #
-# ⚠️ 这几行**默认注释掉**是有意的:
-#    `custom_domain = true` 要求该域名已经在**同一个 Cloudflare 账号**下、
-#    NS 已生效、且没有冲突的 DNS 记录。前提没满足时,取消注释会让
-#    `wrangler deploy` 直接报错失败 —— 连 workers.dev 都上不去。
+# 只用**子域名** poker.pokedriver.me。
 #
-#    所以推荐顺序:
-#      1. 先直接部署一次,拿到 https://poker-dealer.<子域>.workers.dev 并验证能用;
-#      2. 在控制台 Workers → Settings → Domains & Routes → Add Custom Domain
-#         手点一下绑域名(最直观、出错信息也清楚);
-#      3. 确认域名 Active 之后,如果你想让配置进版本库,再把下面取消注释。
+# ⚠️ 绝对不要在这里写 pokedriver.me(主域名)!
+#    主域名已经被同账号下的 Pages 项目 `pokedriver`(宝可驾 · 交规地牢)占用。
+#    在 Worker 的 routes 里声明一个已被占用的 hostname,轻则绑定失败,
+#    重则把那个站顶掉 —— 实测写上去之后 wrangler 仍报成功,
+#    但实际没绑上(所以这个错误很难被发现)。换域名前先去控制台确认
+#    Workers & Pages 里谁占着这个 hostname。
 #
-#    完整步骤见 docs/DEPLOY-WORKER.md。
+# custom_domain = true 会由 Cloudflare 自动创建 DNS 记录并签发证书,
+# 不需要手工加 CNAME。前提:域名在同一个账号下且状态 active。
+#
+# 为什么必须绑自定义域名:部分地区 workers.dev 被 DNS 污染
+# (实测解析到假 IP、443 直接超时),而自定义域名走正常的 Cloudflare 边缘。
 # ─────────────────────────────────────────────────────────────
-# routes = [
-#   { pattern = "pokedriver.me", custom_domain = true },
-#   { pattern = "www.pokedriver.me", custom_domain = true },
-# ]
+routes = [
+  { pattern = "poker.pokedriver.me", custom_domain = true },
+]
 
 # ─────────────────────────────────────────────────────────────
 # 静态资源:前端构建产物

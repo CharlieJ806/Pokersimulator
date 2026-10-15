@@ -13,6 +13,16 @@ import { cardText } from '../core/cards.js';
 import { evaluate, describe, categoryKey } from '../core/handEval.js';
 import { riskLabel } from './personas.js';
 
+/**
+ * 厂商表的懒加载缓存。
+ *
+ * 为什么需要它:callLLMDirect 是**手工拼请求体**的(不像桌面/网页那条路走
+ * buildRequest),所以厂商级默认参数得自己去查一次。不查的话,同一次决策
+ * 在 Node 环境(测试、命令行工具、离线兜底)会漏掉 reasoning_effort,
+ * 而线上带着 —— 正是「测试通过、线上截断」那类最难查的偏差。
+ */
+let sharedProvidersMod = null;
+
 const ACTION_LABEL = { fold: '弃牌', check: '看牌', call: '跟注', raise: '加注', allin: '全下' };
 
 /** 手上的牌力粗评(仅用于本地兜底,不参与提示词里的判断) */
@@ -386,6 +396,7 @@ class PokerAgent {
       if (p.bbCount !== undefined && p.bbCount !== null) {
         s += ` 筹码 ${p.stack}(${p.bbCount} 个大盲`;
         if (p.status === 'out') s += ',已出局';
+        else if (p.status === 'allin') s += ',已全下';
         else if (p.status === 'short') s += ',**短码**';
         else if (p.status === 'deep') s += ',深码';
         else s += ',中码';
@@ -393,9 +404,11 @@ class PokerAgent {
       } else {
         s += ` 筹码 ${p.stack}`;
       }
-      if (p.status === 'out' || p.stack <= 0) {
-        // 已出局的人不再行动 —— 不要给他加「可能在等你先动」这种话,
-        // 那会误导模型以为他还在这手牌里(实测会写出「0 个大盲,可能在等你先动」)
+      // ⚠️ 判「不再参与」只能看 status === 'out'(真出局),
+      //    **不能**写 `|| p.stack <= 0` —— 全下的人筹码也是 0,但他就在这手牌里,
+      //    写成「不再参与」会让 AI 以为可以无视他(实测模型在思考里明确纠结过
+      //    「阿哲怎么显示 0 个大盲已出局,这列表有点混乱」)。
+      if (p.status === 'out') {
         s += '(不再参与)';
         lines.push(s);
         continue;
@@ -703,7 +716,10 @@ class PokerAgent {
       short: '短码(<10 个大盲,再被盲注磨两圈就没了)',
       medium: '中码(10~25 个大盲,还能周转但经不起一次大失误)',
       deep: '深码(>25 个大盲,有资本施压)',
-      out: '已出局',
+      // 「全下」和「已出局」都会显示成 0 个大盲,必须说清楚是哪一种 ——
+      // 混起来会让 AI 以为全下的人已经退场(踩过这个坑,见 stackSituation 的注释)
+      allin: '**已全下**(筹码全在底池里,人还在这一手,赢了就能翻回来)',
+      out: '已出局(这局已经结束)',
     }[status] || '未知';
   }
 
@@ -711,6 +727,9 @@ class PokerAgent {
   _dangerText(view, me) {
     if (!me?.status) return '';
     if (me.status === 'out') return ' —— 你已经没筹码了。';
+    // 全下的人本来就不该被问话(引擎会跳过),这里只是兜底,避免落到
+    // 下面那句「你有资本施压」——对一个筹码全在池子里的人来说完全反了。
+    if (me.status === 'allin') return ' —— 你已经全下,这一手不需要再动作了。';
     if (me.status === 'short') {
       const others = (view.aliveCount || 0) - 1;
       return ` —— **你现在最怕的是被盲注磨死**(还有 ${others} 个对手)。`
@@ -755,7 +774,37 @@ class PokerAgent {
     const started = Date.now();
 
     try {
-      const raw = await this.callLLM(system, user, opts.signal);
+      let raw = await this.callLLM(system, user, opts.signal);
+      let truncated = this.lastTruncated;
+
+      /**
+       * 被截断了就重试一次 —— 不要拿推理散文去猜动作。
+       *
+       * 重试时**显式关掉推理通道**(thinking.type=disabled):
+       * 截断的原因就是 reasoning_content 和正式回答共用 max_tokens,
+       * 关掉推理等于把整个额度都留给正式回答。
+       *
+       * 关键:关掉的只是 reasoning_content(模型给自己看的草稿),
+       * 提示词里要求的 JSON `thinking` 字段**照样会有** —— 那是正式输出的一部分。
+       * 所以界面上依然有中文思考可显示,不是"把思考关了"。
+       *
+       * 只重试一次:连续两次都不行说明这个局面/模型真有问题,
+       * 那就老老实实走本地策略,而不是继续烧调用。
+       */
+      if (truncated) {
+        this.hooks.onDebug?.(`[座位${this.seat + 1}] 截断,重试一次(本次关掉推理通道)`);
+        raw = await this.callLLM(system, user, opts.signal, null, {
+          requestExtra: { thinking: { type: 'disabled' } },
+          maxTokens: Math.max(1200, (this.cfg?.maxTokens || 1200)),
+        });
+        truncated = this.lastTruncated;
+        if (truncated) {
+          this.stats.errors++;
+          this.hooks.onError?.({ seat: this.seat, message: '连续两次都没给出正式回答,已改用本地策略' });
+          return fallback();
+        }
+      }
+
       const elapsed = Date.now() - started;
       const parsed = extractJson(raw);
       let action = null, amount, thinking = '';
@@ -820,6 +869,10 @@ class PokerAgent {
           temperature: cfg.temperature ?? 1.1,
           maxTokens: cfg.maxTokens ?? 300,
           timeoutMs: cfg.timeoutMs || 45000,
+          // 厂商特有的请求参数(例如 reasoning_effort)。
+          // 透传下去之后由 buildRequest 合并进请求体 —— 它放在最后合并,
+          // 所以既覆盖厂商默认,又不用为每个厂商写分支。
+          requestExtra: cfg.requestExtra,
         }, {
           // 第三个参数 thinking:true 表示这是「推理阶段」的增量(界面可弱化显示)
           onDelta: (delta, full, thinking) => hooks.onThink?.(delta, full, thinking),
@@ -869,6 +922,22 @@ class PokerAgent {
         temperature: cfg.temperature ?? 1.1, max_tokens: cfg.maxTokens ?? 300, stream: true,
       };
     }
+    // 厂商特有的请求参数(例如 deepseek 的 reasoning_effort、重试时关掉推理通道)。
+    //
+    // ⚠️ 上面几段是**手工拼的**请求体,所以必须在这里补一次合并。而且要
+    //    和 buildRequest 的 `spec.requestExtra || provider.requestExtra`
+    //    **对齐**:只认 cfg.requestExtra 的话,厂商级默认值在 Node 环境
+    //    (测试、命令行工具、离线兜底)会静默失效 —— 变成
+    //    「测试通过、线上却截断」这种最难查的偏差。
+    let extra = cfg.requestExtra;
+    if (!extra && cfg.provider) {
+      try {
+        // 缓存一下,别每次决策都重新 import
+        sharedProvidersMod = sharedProvidersMod || await import('../shared/providers.mjs');
+        extra = sharedProvidersMod.getProvider(cfg.provider)?.requestExtra;
+      } catch { /* 拿不到就用厂商请求体原样发,不影响功能 */ }
+    }
+    if (extra && typeof extra === 'object') Object.assign(body, extra);
     try {
       const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: controller.signal });
 
@@ -952,19 +1021,27 @@ class PokerAgent {
        *
        * 这一条很容易被忽略 —— 界面上看是「思考了很久」,实际上模型根本
        * 没来得及给决策,后面的动作是从残缺的推理文本里硬猜出来的。
-       * 实测 deepseek-flash 在 max_tokens=300 时就会这样(推理 940 字,
-       * finish_reason=length,回答 0 字)。
+       * 实测 deepseek-flash 在默认 effort=high 下,复杂局面有 33% 的请求
+       * 会这样(推理吃光 1200 token,finish_reason=length,回答 0 字)。
+       *
+       * 记在实例上,让 decide() 能据此重试一次。
        */
+      this.lastTruncated = null;
       if (answerChunks === 0 && reasoningChunks > 0) {
         const note = finishReason === 'length'
           ? `模型把 ${this.cfg?.maxTokens ?? '?'} 个 token 全用在推理上了,正式回答被截断`
           : '模型只输出了推理过程,没有给出正式回答';
-        this.hooks.onTruncated?.({
+        this.lastTruncated = {
           seat: this.seat, reason: finishReason, note,
           reasoningChars: reasoning.length, suggestedMaxTokens: Math.max(1200, (this.cfg?.maxTokens || 300) * 3),
-        });
+        };
+        this.hooks.onTruncated?.(this.lastTruncated);
         this.hooks.onDebug?.(`[座位${this.seat + 1}] ${note}`);
       }
+      // ⚠️ 这里 `|| reasoning` 是**有争议的兜底**:正式回答为空时把推理原文
+      //    当答案交出去,调用方会拿英文散文去解析 JSON、失败后还可能从散文里
+      //    猜出一个动作(实测猜出过 allin)。保留是为了还能抢救出一点信息,
+      //    但 decide() 会先看 lastTruncated 并重试 —— 不要依赖这条兜底做决策。
       return full || reasoning;
     } finally {
       clearTimeout(timer);

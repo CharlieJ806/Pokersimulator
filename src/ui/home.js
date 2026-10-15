@@ -60,6 +60,12 @@ export function createHome(root, { onPick } = {}) {
 
       <div class="setup__foot">
         <div class="setup__footInfo">模型请求走本机主进程代理,API Key 只存在你自己的设置文件里。</div>
+        <!-- 角色立绘的署名 —— CC BY-NC-SA 4.0 要求署名,分发出去的应用里必须看得见。
+             完整条款与逐作者署名见 THIRD-PARTY-NOTICES.md 与 assets/portraits/SOURCES.md。 -->
+        <div class="setup__credit">
+          角色立绘来自 <b>CrossPet</b> 及其社区作者 · 许可 <b>CC BY-NC-SA 4.0</b>
+          (署名 · 非商业性使用 · 相同方式共享)
+        </div>
       </div>
     </div>`;
 
@@ -90,13 +96,20 @@ export function createHome(root, { onPick } = {}) {
 
   function show() {
     clearTimeout(closeTimer);
+    // ⚠️ 这里必须把可能残留的内联 display 清掉。
+    //    以前 hide() 会设 el.style.display = 'none',而内联样式的优先级
+    //    高于 .setup.is-open 的 opacity —— 于是「退出本局,回主页」点了以后
+    //    主页永远是 hidden(状态其实已经重置了,只是屏幕上看不到,像是按钮失灵)。
+    //    现在改成完全依赖 CSS 的 opacity + pointer-events,不再碰 display。
+    el.style.display = '';
     el.classList.add('is-open');
   }
 
   function hide() {
     el.classList.remove('is-open');
-    // 等淡出动画结束再真正隐藏,避免闪一下
-    closeTimer = setTimeout(() => { el.style.display = 'none'; }, 260);
+    // 不再延时设 display:none —— 隐藏交给 CSS(.setup 的 opacity:0 + pointer-events:none),
+    // 淡出由 transition 完成。额外设 display 既多余,又会把 show() 堵死(见上面的注释)。
+    clearTimeout(closeTimer);
   }
 
   return { show, hide, el, isOpen: () => el.classList.contains('is-open') };

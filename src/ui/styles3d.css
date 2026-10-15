@@ -331,6 +331,12 @@ body.is-sidepanel-open .handstrip { --strip-right: var(--strip-right-panel, 338p
 }
 .handrow__who { display: flex; align-items: center; gap: 5px; }
 .handrow__who .plate__name { font-size: 11.5px; }
+/* 立绘 accent 色点:颜色随该座位立绘走,用来区分「同一个模型」的多个座位。
+   和人物脚下的圈同色,所以对着看一眼就能把名牌和桌上的人对上。 */
+.handrow__dot {
+  width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto;
+  box-shadow: 0 0 0 1.5px rgba(0,0,0,.45), 0 0 6px -1px currentColor;
+}
 /* 位置标记:按钮位金色、小盲蓝色、大盲红色 */
 .posbadge {
   font-size: 9.5px; font-weight: 800; line-height: 1.5;
@@ -503,12 +509,25 @@ body.is-sidepanel-open .handstrip { --strip-right: var(--strip-right-panel, 338p
 
 .setup {
   position: absolute; inset: 0;
-  display: grid; place-items: center;
+  /**
+   * ⚠️ `safe` 不能省。
+   *
+   * 这是居中布局的经典坑:卡片比容器高时,`place-items: center` 会让它
+   * **上下同时溢出**,而滚动容器只能滚到下方 —— **上面那部分永远够不着**。
+   * 手机上设置面板正好超高,用户实测到的就是「上方只能看到大小盲那一块,
+   * 人数设置看不见;下面最后一行按钮被切掉一截」。
+   *
+   * `safe` 关键字让对齐在**内容溢出时退化为 start**(顶对齐),
+   * 于是整张卡片都能滚到。正常放得下时仍然是居中,视觉不变。
+   */
+  display: grid; place-items: safe center;
   background: radial-gradient(120% 100% at 50% 0%, rgba(16,26,31,.97), rgba(3,7,9,.99));
   backdrop-filter: blur(8px);
   opacity: 0; pointer-events: none;
   transition: opacity .24s ease;
   padding: 22px; overflow: auto;
+  /* 滚动时不把卡片顶部/底部贴死在边缘(safe center 生效时用不到,保险起见) */
+  scroll-padding: 22px 0;
 }
 .setup.is-open { opacity: 1; pointer-events: auto; }
 .setup--drawer { background: rgba(3,6,8,.78); }
@@ -625,6 +644,9 @@ input[type="range"]::-webkit-slider-thumb {
   padding: 14px 26px 20px; border-top: 1px solid var(--line); margin-top: 10px; flex-wrap: wrap;
 }
 .setup__footInfo { font-size: 12px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+/* 立绘署名:CC BY-NC-SA 4.0 要求署名,所以要能看清(但别抢主信息的注意力) */
+.setup__credit { font-size: 11px; color: var(--text-dim); opacity: .75; margin-top: 4px; line-height: 1.5; }
+.setup__credit b { color: #c9b273; font-weight: 600; }
 .setup__footBtns { display: flex; gap: 10px; flex-wrap: wrap; }
 
 /* ============================================================
@@ -1032,6 +1054,13 @@ body.is-player-mode .actionbar__hint { display: none; }
 .keyrow { background: rgba(255,255,255,.04); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; }
 .keyrow__head { display: flex; align-items: center; gap: 7px; margin-bottom: 6px; flex-wrap: wrap; }
 .keyrow__head b { font-size: 12.5px; }
+/* 中转站 Key 的「用处」输入框:跟标题同一行,占满剩余宽度,别把删除按钮挤下去 */
+.ckey__label {
+  flex: 1 1 auto; min-width: 0; font-size: 12.5px;
+  padding: 3px 7px; border-radius: 7px;
+  background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.12);
+  color: inherit;
+}
 .keyrow__link { font-size: 10.5px; color: var(--gold); text-decoration: none; margin-left: auto; }
 .keyrow__link:hover { text-decoration: underline; }
 .keyrow input {

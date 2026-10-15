@@ -94,28 +94,48 @@ canvas#gl {
     z-index: 60;
   }
 
-  /* —— 手牌一览:压到最小可用高度 —— */
+  /* —— 操作条:手机上压扁,省下的高度留给牌桌 ——
+     它 z-index:20、贴在 bottom:0,高度直接决定手牌一览要往上让多少。 */
+  .actionbar {
+    padding: 6px 10px 8px;
+    gap: 8px;
+  }
+  .actionbar .btn {
+    min-height: 40px;
+    padding: 0 10px;
+    font-size: 12px;
+  }
+  .actionbar__btns { gap: 6px; }
+  .actionbar__hint { font-size: 11.5px; }
+
+  /* —— 手牌一览:压到最小可用高度,并且**必须让开底部操作条** ——
+     ⚠️ 这里以前写的是 bottom: 8px,结果整条手牌一览和操作条
+        (bottom:0 + z-index:20)重叠 60 多像素,而重叠的那一段正好是
+        **牌面**(名字在最上面、牌在名字下面)。
+        于是手机上一眼看不到自己的牌 —— 用户反馈的「底部栏有遮挡」就是这个。
+        现在按操作条的实际高度往上让(--actionbar-h 由 mobileLayout.js 实测写入,
+        不写死数字)。 */
   .handstrip {
     left: 8px;
     right: 8px;
-    bottom: 8px;
+    bottom: calc(var(--actionbar-h, 71px) + 6px);
     --mcw: 22px;
-    --mch: 30px;
+    --mch: 28px;
   }
   .handstrip__head {
-    padding: 2px 8px;
-    min-height: 24px;
+    padding: 1px 8px;
+    min-height: 22px;
   }
   .handstrip__title { font-size: 11px; }
   .handstrip__note { display: none; }          /* 说明性文案,手机上省掉 */
   .handstrip__board {
-    padding: 2px 8px;
-    min-height: 26px;
+    padding: 1px 8px;
+    min-height: 24px;
     gap: 6px;
   }
   .handstrip__boardLabel, .handstrip__street { font-size: 10.5px; }
-  .handstrip__body { padding: 3px 8px 5px; gap: 5px; }
-  .handrow { min-width: 58px; padding: 3px 5px; }
+  .handstrip__body { padding: 2px 8px 4px; gap: 5px; }
+  .handrow { min-width: 58px; padding: 2px 5px; gap: 3px; }
   .handrow__stack { font-size: 10px; }
   .hscard__pos { font-size: 9px; }
 
@@ -127,12 +147,21 @@ canvas#gl {
     scrollbar-width: none;
     -webkit-overflow-scrolling: touch;
     /* 高度按内容走,但给出上限防止把牌桌挤没 */
-    max-height: 96px;
+    max-height: 88px;
   }
   .handstrip__body::-webkit-scrollbar { display: none; }
 
   /* 展开态(点了「收起」的切换)才需要滚动 */
   .handstrip.is-collapsed .handstrip__body { display: none; }
+
+  /* —— 设置面板:手机上卡片通常比视口高,必须能滚到最上面和最下面 ——
+     ⚠️ 光靠 `.setup` 的 `place-items: safe center` 还不够:外层 padding
+        (桌面 22px)在只有 440px 高的横屏上太占地方。这里收窄留白,
+        并给底部留出足够空间,免得最后一行按钮贴边被切。 */
+  .setup { padding: 8px 10px 14px; }
+  .setup__head { padding: 10px 14px 6px; }
+  .setup__body { padding: 10px 14px 6px; gap: 8px 18px; }
+  .setup__foot { padding: 8px 14px 12px; }
 
   /* —— 下注 / 操作条:位置由 JS 动态对齐到手牌一览上沿 ——
      (见 mobileLayout.js 的 syncPlayerBarAnchor。

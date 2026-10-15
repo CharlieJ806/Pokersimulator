@@ -10,6 +10,9 @@
 | **荷官模式** | 发牌的人 | 你发牌、控节奏、看牌。桌上 2~9 个 AI 互相博弈,想看清谁在想什么就停下来点「下一位」 |
 | **玩家模式** | 上桌的人 | 你自己打。牌局进行中看不到别人的底牌和思考,这一手结束后可以回顾所有人当时在想什么 |
 
+每个座位的人物立绘由**这个座位用的是哪个模型**决定(Claude 座位就是 Claude 娘,DeepSeek 座位就是 DeepSeek 娘……);
+同一个模型被多个座位用到时,用不同色调和脚下的光圈区分。
+
 桌面版(Electron)与浏览器版(手机横屏可玩)。
 
 ---
@@ -101,9 +104,21 @@ vendor/three.module.js   three.js r169(MIT,单文件,离线)
 
 - **3D 引擎**:[three.js](https://github.com/mrdoob/three.js) r169(MIT),已内置在
   `vendor/three.module.js`,离线可用。
-- **角色、牌桌、牌面、筹码、房间**:全部**程序化生成**(基础几何体 + Canvas 贴图),
+- **牌桌、牌面、筹码、房间**:全部**程序化生成**(基础几何体 + Canvas 贴图),
   无外部模型文件、无字体依赖。
 - 配色参考 [nice-color-palettes](https://github.com/Jam3/nice-color-palettes)(MIT,只取色值)。
+- **座位上的 2D 立绘**:取自开源项目 [CrossPet](https://github.com/lokicorvus/crosspet),
+  许可是 **CC BY-NC-SA 4.0**(署名 — **非商业性使用** — 相同方式共享),
+  **与代码的 MIT 不同、而且更严格**。
+
+> ⚠️ **关于立绘的许可**:这 30 张立绘按 CC BY-NC-SA 4.0 发布,所以
+> 1. 必须保留署名(见 [assets/portraits/SOURCES.md](assets/portraits/SOURCES.md));
+> 2. **本项目的这类版本不得用于商业目的**;
+> 3. 基于它做的衍生作品也要以 CC BY-NC-SA 4.0 发布。
+>
+> 座位显示哪套立绘由该座位使用的**模型**决定;认不出的模型用本项目自绘的通用占位立绘。
+> 完整条款与逐作者署名见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) 第 0 节。
+
 - 调研过的第三方素材及其许可证核查结论见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
 
 ## 文档

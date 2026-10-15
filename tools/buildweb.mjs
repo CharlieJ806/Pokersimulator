@@ -96,6 +96,81 @@ log('\n[3] vendor/three.module.js');
 const nVendor = copyDir(path.join(ROOT, 'vendor'), path.join(OUT, 'vendor'));
 log(`  + vendor/ 共 ${nVendor} 个文件`);
 
+/* 3b. assets/portraits —— 2D 立绘
+ *
+ * 为什么必须复制:src/ui3d/portraits2d.js 用的是相对路径
+ *   ../../assets/portraits/...
+ * 在 Electron 里从 src/ui3d/ 往上两级 = 仓库根的 assets/;
+ * 在网页版里从 web/dist/src/ui3d/ 往上两级 = web/dist/assets/,
+ * 所以只要把 assets/ 整体放到 dist 根,两个环境的相对路径就一致了。
+ *
+ * 顺带把许可与来源说明一起带上 —— CC BY-NC-SA 4.0 要求署名,
+ * 发布出去的静态站点里必须有 LICENSE.md / SOURCES.md。 */
+log('\n[3b] assets/portraits(2D 立绘)');
+const PORTRAIT_SRC = path.join(ROOT, 'assets', 'portraits');
+let nPortraits = 0;
+if (fs.existsSync(PORTRAIT_SRC)) {
+  nPortraits = copyDir(PORTRAIT_SRC, path.join(OUT, 'assets', 'portraits'));
+  log(`  + assets/portraits 共 ${nPortraits} 个文件`);
+  for (const f of ['LICENSE.md', 'SOURCES.md', 'manifest.js']) {
+    if (!fs.existsSync(path.join(OUT, 'assets', 'portraits', f))) {
+      warn(`assets/portraits/${f} 缺失 —— 许可是 CC BY-NC-SA 4.0,署名文件不能丢`);
+    }
+  }
+  // manual.js 是手工素材的清单,portraits2d.js 会**静态 import** 它。
+  // 缺了的话不是「少两个角色」而是整个模块加载失败(立绘全没),
+  // 所以必须在构建期就拦住,而不是等运行时白屏。
+  if (!fs.existsSync(path.join(OUT, 'assets', 'portraits', 'manual.js'))) {
+    warn('assets/portraits/manual.js 缺失 —— portraits2d.js 静态 import 它,缺了整个立绘模块会加载失败。'
+      + '先跑 node_modules/.bin/electron tools/prepmanualportraits.mjs');
+  }
+
+  /* 3c. **路径大小写**校验 —— 这条很值钱,别删。
+   *
+   * 为什么必须查:Worker 的 not_found_handling 是 single-page-application,
+   * 找不到的资源会**返回 index.html + HTTP 200**,而不是 404。
+   * 于是「清单里写 qwen/idle.webp,目录却叫 Qwen」这种错在本地完全看不出来
+   * (Windows 不区分大小写),线上也不报错 —— 只是浏览器把 HTML 当图片解码失败,
+   * **立绘静默变空白**。实测线上 /assets/portraits/Qwen/idle.webp 返回的
+   * 就是 200 + text/html 的 index.html。
+   *
+   * 而 fs.existsSync 在 Windows 上不区分大小写,所以不能直接用它判 ——
+   * 必须拿父目录的 readdirSync 结果做**严格字符串比对**。 */
+  const caseProblems = [];
+  for (const mf of ['manifest.js', 'manual.js']) {
+    const abs = path.join(OUT, 'assets', 'portraits', mf);
+    if (!fs.existsSync(abs)) continue;
+    // manifest.js 是 ESM,这里只要里面的路径字符串,直接用正则扫,不 import
+    const text = fs.readFileSync(abs, 'utf8');
+    const pairs = [...text.matchAll(/"id":\s*"([^"]+)"|"file":\s*"([^"]+)"/g)];
+    let currentDir = null;
+    for (const m of pairs) {
+      if (m[1] !== undefined) { currentDir = m[1]; continue; }
+      if (!currentDir || !m[2]) continue;
+      const dirAbs = path.join(OUT, 'assets', 'portraits', currentDir);
+      if (!fs.existsSync(dirAbs)) { caseProblems.push(`${mf}: 目录 ${currentDir} 不存在`); continue; }
+      // 严格比对目录名(排除大小写不同但 existsSync 为真的情况)
+      const realDirs = fs.readdirSync(path.join(OUT, 'assets', 'portraits'));
+      if (!realDirs.includes(currentDir)) {
+        caseProblems.push(`${mf}: 目录名大小写不符,清单写 "${currentDir}",实际是 `
+          + `"${realDirs.find((d) => d.toLowerCase() === currentDir.toLowerCase()) || '?'}"`);
+      }
+      const realFiles = fs.readdirSync(dirAbs);
+      if (!realFiles.includes(m[2])) {
+        const near = realFiles.find((f) => f.toLowerCase() === m[2].toLowerCase());
+        caseProblems.push(`${mf}: ${currentDir}/${m[2]} ${near ? `大小写不符(实际 ${near})` : '不存在'}`);
+      }
+    }
+  }
+  if (caseProblems.length) {
+    for (const p of caseProblems) warn(`立绘路径大小写问题 —— ${p}`);
+  } else {
+    log('  ok  立绘清单里的路径大小写与实际文件完全一致');
+  }
+} else {
+  warn('assets/portraits 不存在 —— 立绘会全部退化成通用占位。先跑 node tools/fetchportraits.mjs');
+}
+
 /* ------------------------------------------------------------ 校验 */
 
 log('\n[4] 校验');
@@ -220,7 +295,7 @@ const { total, files } = dirSize(OUT);
 const kb = (n) => `${(n / 1024).toFixed(1)} KB`;
 log('\n[5] 产物统计');
 log(`  文件 ${files} 个,合计 ${kb(total)}`);
-for (const part of ['vendor', 'src', 'web']) {
+for (const part of ['vendor', 'src', 'web', 'assets']) {
   const d = path.join(OUT, part);
   if (fs.existsSync(d)) {
     const s = dirSize(d);

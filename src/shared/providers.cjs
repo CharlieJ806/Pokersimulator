@@ -35,6 +35,10 @@ const FALLBACK_DEEPSEEK = {
   keyHint: 'sk-...',
   note: '',
   signup: 'https://platform.deepseek.com',
+  // 必须与 providers.mjs 里的 deepseek 保持一致 —— 少了这一条,
+  // 模块还没就绪时发出的请求就会退回 effort=high,复杂局面下
+  // 推理吃光 max_tokens、正式回答被截断(实测截断率 33%)。
+  requestExtra: { reasoning_effort: 'low' },
 };
 
 function PROVIDERS() { return impl ? impl.PROVIDERS : [FALLBACK_DEEPSEEK]; }

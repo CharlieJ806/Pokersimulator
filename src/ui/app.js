@@ -22,6 +22,9 @@
 import { PokerEngine } from '../core/engine.js';
 import { SceneTable, fmt } from '../ui3d/sceneFull.js';
 import { createSetup } from '../ui3d/setup3d.js';
+import { characterForModel, assignAccents, assignDisplayNames, displayNameForModel, GENERIC_CHAR } from '../ai/portraits.js';
+import { baseAccentFor, preloadPortraits } from '../ui3d/portraits2d.js';
+import { PERSONA_MAP } from '../ai/personas.js';
 import { createHome } from './home.js';
 import { createPlayerBar } from './playerbar.js';
 import { createReviewPanel } from './review.js';
@@ -152,6 +155,8 @@ export class GameApp {
     this.engine = null;
     this.agents = new Map();
     this.personaMap = new Map();
+    /** 座位 → { charId, accent }:该座位显示哪套 2D 立绘(由模型决定) */
+    this.portraitMap = new Map();
     this.table = null;
     this.setup = null;
     this.drawer = null;
@@ -216,6 +221,7 @@ export class GameApp {
     this.root.appendChild(tableRoot);
     this.table = new SceneTable(tableRoot, {
       getPersona: (seat) => this.personaMap.get(seat),
+      getPortrait: (seat) => this.portraitMap.get(seat),
     });
     this.bindTableButtons();
 
@@ -363,6 +369,7 @@ export class GameApp {
     this.engine = null;
     this.agents.clear();
     this.personaMap.clear();
+    this.portraitMap.clear();
     this.mode = null;
     this.table.setMode('dealer', null);
     this.table.setDealEnabled(false);
@@ -414,6 +421,13 @@ export class GameApp {
     if (res?.config) {
       this.cfg = { ...res.config, hasKey: res.hasKey, configPath: this.cfg?.configPath, providerList: this.cfg?.providerList };
       this.syncAgents();
+      // 立绘跟着模型走:换了某个座位的模型就立刻换立绘 + 改名,不用等重开一局
+      if (this.engine) {
+        this.refreshSeatNames();
+        this.buildPortraits();
+        this.table.applyPortraits?.();
+        this.render();
+      }
       this.syncTopbar();
       this.render();
       this.table.toast(`模型已更新:${this.llmSummary()}`, 'ok', 3200);
@@ -483,11 +497,41 @@ export class GameApp {
     return { providerId: pid, model };
   }
 
+  /**
+   * 该座位用哪个自定义中转站的 Key。
+   *
+   * 中转站的特点是:**一个地址 + 多个 Key**,每个 Key 能调的模型不一定相同。
+   * 所以座位要先选 Key(seatCustomKeys),再填模型名(seatModels)。
+   * 没选就用第一个 Key。
+   */
+  customKeyFor(seat) {
+    const list = this.cfg?.customKeys || [];
+    const wanted = this.cfg?.seatCustomKeys?.[seat];
+    return list.find((k) => k.id === wanted) || list[0] || null;
+  }
+
   agentCfg(seat) {
     const { providerId, model } = this.resolveSeatLLM(seat);
     const keys = this.localOnly ? {} : (this.cfg?.keys || {});
     const list = this.cfg?.providerList || [];
     const p = list.find((x) => x.id === providerId);
+
+    // 自定义中转站:地址来自配置(全局一个),Key 来自该座位选的那个
+    if (providerId === 'custom') {
+      const endpoint = String(this.cfg?.customEndpoint || '').trim();
+      const ck = this.customKeyFor(seat);
+      const key = String(ck?.key || '').trim();
+      return {
+        providerId,
+        provider: p,
+        model,
+        apiKey: key,
+        enabled: !!endpoint && !!key && !this.localOnly,
+        endpoint,
+        kind: 'openai',
+      };
+    }
+
     const enabled = providerId !== 'local' && (!!p?.noKey || !!keys[providerId]) && !this.localOnly;
     return {
       providerId,
@@ -552,19 +596,41 @@ export class GameApp {
       humanSeat: this.mode === 'player' ? (this.playerSeat ?? 0) : null,
     });
 
-    // 每个座位一个独立 AI 实例 + 一个随机性格 + 各自解析出的厂商/模型
+    // 每个座位一个独立 AI 实例。
+    //
+    // 名字与性格现在是**两条独立的线**(用户的要求):
+    //   · 名字跟着**模型**走 —— 同名(同一个模型族群)自动加序号区分,
+    //     由 assignDisplayNames 统一编号,保证一桌不重名;
+    //   · 性格可以在「模型」面板里逐座位指定(seatPersonas),留空则随机。
+    // 所以这里先随机分性格(拿它的打法参数),再把名字换成模型名。
     const personas = assignPersonas(g.seats);
+    const human = this.mode === 'player' ? (this.playerSeat ?? 0) : null;
+
+    // —— 先算显示名:玩家座位固定叫「你」,其余按模型 ——
+    const nameEntries = [];
+    for (let seat = 0; seat < g.seats; seat++) {
+      if (seat === human) { nameEntries.push({ seat, name: '你' }); continue; }
+      const { providerId, model } = this.resolveSeatLLM(seat);
+      nameEntries.push({ seat, name: displayNameForModel(providerId, model) });
+    }
+    const names = assignDisplayNames(nameEntries);
+    this.seatNames = names;
+
     this.agents.clear();
     this.personaMap.clear();
-    const human = this.mode === 'player' ? (this.playerSeat ?? 0) : null;
     for (let seat = 0; seat < g.seats; seat++) {
-      const persona = personas[seat];
-      // 玩家模式下,humanSeat 是「我」:不建 AI 实例,名字也换成「你」
+      const base = personas[seat];
+      // 玩家模式下,humanSeat 是「我」:不建 AI 实例,名字固定「你」
       if (seat === human) {
         this.personaMap.set(seat, { id: 'you', name: '你', tag: '你自己', emoji: '🙂', seed: 0 });
         this.engine.state.players[seat].name = '你';
         continue;
       }
+      // 配置里指定了性格就用它(留空/认不出则沿用随机结果)
+      const wanted = this.cfg?.seatPersonas?.[seat];
+      const picked = (wanted && PERSONA_MAP?.[wanted]) || base;
+      // 名字换成模型名,但**保留性格的打法参数**(vpip/aggression/risk…)与标签
+      const persona = { ...picked, personaName: picked.name, name: names[seat] };
       this.personaMap.set(seat, persona);
       const agent = new PokerAgent(seat, persona, this.agentCfg(seat), {});
       this.agents.set(seat, agent);
@@ -579,7 +645,67 @@ export class GameApp {
     }
     this.syncAgents();
     this.engine.onLog = (entry) => this.table.pushLog(entry);
+    this.buildPortraits();
     this.syncTopbar();
+  }
+
+  /**
+   * 重新计算座位显示名并应用到引擎/personaMap。
+   *
+   * 名字跟着**模型**走,所以在「模型」面板里改了某人的模型之后要立刻改名 ——
+   * 否则会出现「立绘换了、名字还是旧的」这种对不上的状态。
+   * (不改打法:打法由性格决定,那次改动只需要 syncAgents。)
+   */
+  refreshSeatNames() {
+    const players = this.engine?.state?.players || [];
+    if (!players.length) return;
+    const human = this.mode === 'player' ? (this.playerSeat ?? 0) : null;
+    const entries = players.map((p) => {
+      if (p.seat === human) return { seat: p.seat, name: '你' };
+      const { providerId, model } = this.resolveSeatLLM(p.seat);
+      return { seat: p.seat, name: displayNameForModel(providerId, model) };
+    });
+    const names = assignDisplayNames(entries);
+    this.seatNames = names;
+    for (const p of players) {
+      if (names[p.seat]) p.name = names[p.seat];
+      const persona = this.personaMap.get(p.seat);
+      if (persona && names[p.seat]) persona.name = names[p.seat];
+    }
+  }
+
+  /**
+   * 决定每个座位显示哪套 2D 立绘。
+   * 立绘由**该座位用的模型**决定(见 ai/portraits.js 的映射规则),
+   * 认不出来的模型用通用占位。同一套立绘被同桌多个座位用到时,
+   * 用不同 accent 色调区分(光看立绘分不出谁是谁)。
+   *
+   * 必须在 table.buildSeats() **之前**算好 —— 建座位时会同步读这张表。
+   */
+  buildPortraits() {
+    const players = this.engine?.state?.players || [];
+    if (!players.length) { this.portraitMap.clear(); return; }
+    const human = this.mode === 'player' ? (this.playerSeat ?? 0) : null;
+
+    const entries = [];
+    for (const p of players) {
+      let charId;
+      if (p.seat === human) {
+        // 「你」不是 AI,没有模型可对应 —— 用中性占位,不冒用任何厂商形象
+        charId = GENERIC_CHAR;
+      } else {
+        const { providerId, model } = this.resolveSeatLLM(p.seat);
+        charId = characterForModel(providerId, model);
+      }
+      entries.push({ seat: p.seat, char: charId, baseAccent: baseAccentFor(charId) });
+    }
+
+    const accents = assignAccents(entries);
+    this.portraitMap.clear();
+    for (const e of entries) this.portraitMap.set(e.seat, { charId: e.char, accent: accents[e.seat] });
+
+    // 开局前先把 idle 图热一下,免得第一帧是空的
+    preloadPortraits([...new Set(entries.map((e) => e.char))], ['idle']);
   }
 
   /** 中途改规则:需要重开一局 */
@@ -1327,7 +1453,8 @@ export class GameApp {
 
     d.btnModels.addEventListener('click', () => {
       const seats = this.engine?.state?.players?.length || this.cfg?.game?.seats || 6;
-      this.modelsPanel.setSeats(seats, this.personaMap);
+      // 第三个参数是座位显示名(模型名),面板用它展示「这个名字是谁」
+      this.modelsPanel.setSeats(seats, this.personaMap, this.seatNames);
       this.modelsPanel.fill(this.cfg);
       this.modelsPanel.show();
     });
