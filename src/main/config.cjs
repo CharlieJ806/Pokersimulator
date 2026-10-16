@@ -113,7 +113,10 @@ const DEFAULT_CONFIG = {
   ui: {
     thinkDelayMs: 900,
     autoNextHand: false,
-    showThinking: true,
+    // ⚠️ 这里原来有 showThinking: true(顶栏「💭 气泡」按钮 + 设置里「显示思考气泡」)。
+    //    两个入口都删了:它控制的只是「气泡里显不显示思考文字」,而那个行为现在固定为开
+    //    (见 src/ui/app.js 的 takeTurn)。留着这个键会变成死字段 ——
+    //    键在配置里、没人读,排查时以为它还在起作用。
     deckView: 'down',        // down = 全部盖着(默认) | board = 只看公共牌 | up = 全翻开(荷官特权)
   },
 };
@@ -150,8 +153,9 @@ function deepMerge(base, extra) {
 const llmAborts = new Map();
 
 /**
- * 清掉已废弃的配置键 —— 目前只有一个:game.blindLevelOrbits。
+ * 清掉已废弃的配置键 —— 目前有两个:game.blindLevelOrbits 和 ui.showThinking。
  *
+ * blindLevelOrbits 的来龙去脉:
  * 它是上一版加的「每 N 个人回合升一档」的周期,单位错了(9 人桌 1 个回合 = 9 手),
  * 已被 game.blindLevelHands(按手)取代。这里**只删键、不迁移数值**:
  *   · 旧值是在「回合」这个错单位下填进去的。乘上人数看似"保留原手感",
@@ -161,13 +165,22 @@ const llmAborts = new Map();
  *   · 留着才是真麻烦:仓库里已经有过「死字段」—— 键在配置里、没人读、排查时
  *     以为它还在起作用。删掉后 blindLevelHands 走默认值,设置面板里那格会显示
  *     明确的「每 N 手升一档」,用户看一眼就能重填。
+ *
+ * ui.showThinking 同理,而且更直接:它控制的只是「气泡里显不显示思考文字」
+ * (不是气泡本身的显隐 —— 那是 ctx().revealThinking,属于玩家模式的信息隔离)。
+ * 顶栏的「💭 气泡」按钮和设置里的「显示思考气泡」都删了,行为固定为显示,
+ * 所以配置里这份值已经没有任何读者。删掉它,老配置里存着的 false 也一并消失 ——
+ * 否则「配置里明明写着 false,气泡却照样显示文字」会被当成 bug 查半天。
  */
 function stripLegacyKeys(cfg) {
-  if (!cfg || !cfg.game || cfg.game.blindLevelOrbits === undefined) return cfg;
-  // 复制一层再删:deepMerge 在「补丁里没有 game 这一支」时会直接把 DEFAULT_CONFIG.game
-  // 的引用交出来,原地 delete 会动到默认配置(下次读就少一个键)。
-  const out = { ...cfg, game: { ...cfg.game } };
-  delete out.game.blindLevelOrbits;
+  const hasOrbits = cfg?.game?.blindLevelOrbits !== undefined;
+  const hasThinking = cfg?.ui?.showThinking !== undefined;
+  if (!hasOrbits && !hasThinking) return cfg;
+  // 复制一层再删:deepMerge 在「补丁里没有 game / ui 这一支」时会直接把 DEFAULT_CONFIG
+  // 里那一支的引用交出来,原地 delete 会动到默认配置(下次读就少一个键)。
+  const out = { ...cfg };
+  if (hasOrbits) { out.game = { ...cfg.game }; delete out.game.blindLevelOrbits; }
+  if (hasThinking) { out.ui = { ...cfg.ui }; delete out.ui.showThinking; }
   return out;
 }
 

@@ -156,10 +156,13 @@ export function createSetup(root, { onStart, onSaveAI, onExitHome, onBack, onMod
             </label>
           </div>
 
-          <!-- 玩家模式下看不到别人的思考,这个开关就没意义了(由 setMode 隐藏) -->
-          <div class="setup__toggles" id="thinkToggleRow">
-            <label class="switch"><input type="checkbox" id="showThinking" checked><i></i><span>显示思考气泡</span></label>
-          </div>
+          <!-- ⚠️ 这里原来是「显示思考气泡」开关(#showThinking + #thinkToggleRow)。
+               已经删掉了,和顶栏那个「💭 气泡」按钮一起:
+               它控制的只是**气泡里要不要显示思考文字**,而这个行为现在固定为开
+               (见 app.js 里 stepOnce 的 onThink / thinkingText)。留着会变成一个
+               「点了没反应」的死开关 ——
+               本仓库已经在 blindUpEvery 上踩过这个坑(界面入口撤了、字段还在)。
+               玩家模式那边本来就用 setPlayerMode 把它藏起来,现在整行不存在了。 -->
 
           <div class="personas" id="personaList"></div>
           <p class="setup__note" id="apiNote"></p>
@@ -275,7 +278,8 @@ export function createSetup(root, { onStart, onSaveAI, onExitHome, onBack, onMod
     // AI 记性默认开:关掉的话 AI 每手都从零开始,打法不会有变化
     q('rememberPlayers').checked = ui.rememberPlayers !== false;
     q('notesEvery').value = (ui.notesEvery === undefined ? 3 : ui.notesEvery);
-    q('showThinking').checked = ui.showThinking !== false;
+    // 老配置里的 ui.showThinking 不再读了(开关已删,思考文字恒为显示);
+    // 键本身由 config.cjs / web/pokerApi.js 的 stripLegacyKeys 清掉。
     // 保留已保存的模型名(以前传 false,每次打开设置都被重置成厂商默认,用户的选择被冲掉)
     syncModels(true);
     syncLabels();
@@ -386,7 +390,10 @@ export function createSetup(root, { onStart, onSaveAI, onExitHome, onBack, onMod
       // notesEvery = 每几手整理一次;0 等于关掉(不额外花调用)。
       rememberPlayers: q('rememberPlayers').checked,
       notesEvery: Math.max(0, Math.min(20, Math.floor(Number(q('notesEvery').value) || 0))),
-      showThinking: q('showThinking').checked,
+      // ⚠️ 这里原来还有 showThinking: q('showThinking').checked。
+      //    那个开关和顶栏的「💭 气泡」按钮一起删了 —— 思考文字在气泡里恒为显示,
+      //    没有可写的值。**不要再把它写回来**,哪怕是写死 true:
+      //    配置里留一个没人读的键就是这个仓库反复出现的「死字段」。
     };
     return { game, ai, ui };
   }
@@ -483,11 +490,9 @@ export function createSetup(root, { onStart, onSaveAI, onExitHome, onBack, onMod
   function hide() { wrap.classList.remove('is-open'); }
   function destroy() { wrap.remove(); }
 
-  /** 玩家模式下藏掉「显示思考气泡」(看不到别家的思考,这个开关没意义) */
+  /** 玩家模式下藏掉荷官专属的设置项(目前只剩标题说明随模式变;「显示思考气泡」开关已删) */
   function setPlayerMode(on) {
     isPlayerMode = !!on;
-    const row = q('thinkToggleRow');
-    if (row) row.hidden = !!on;
     // 标题说明随模式变:玩家模式下不该出现「你是荷官」这种说法
     const sub = q('setupSub');
     if (sub) {

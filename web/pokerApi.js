@@ -78,7 +78,9 @@ const DEFAULT_CONFIG = {
   ui: {
     thinkDelayMs: 900,
     autoNextHand: false,
-    showThinking: true,
+    // ⚠️ showThinking 已删(与 config.cjs 同步):顶栏的「💭 气泡」按钮和设置里的
+    //    「显示思考气泡」都没了,思考文字在气泡里恒为显示。
+    //    两端默认值必须一致 —— 否则会出现「网页版还认这个键、桌面版不认」的差异。
     deckView: 'down',
     flowMode: 'manual',
     flowSpeed: 1,
@@ -101,16 +103,24 @@ function deepMerge(base, extra) {
 /* ------------------------------------------------------------ 存储 */
 
 /**
- * 清掉已废弃的配置键(game.blindLevelOrbits)。
+ * 清掉已废弃的配置键(game.blindLevelOrbits 和 ui.showThinking)。
  *
  * 与桌面版 config.cjs 的 stripLegacyKeys 同一份规矩:**只删键、不迁移数值** ——
  * 旧值是在「个人回合」这个错单位下填的,乘人数会造出一个用户从没打算要的数字。
  * 两端的迁移规则必须一致,否则「网页版还认旧键、桌面版不认」这种差异没人查得出来。
+ *
+ * ui.showThinking 是「气泡里显不显示思考文字」的旧开关(顶栏按钮 + 设置开关都删了,
+ * 现在恒为显示)。老配置里存着的 false 必须一并删掉,不然「配置写着 false、
+ * 气泡却照样显示文字」会被当成 bug 查。
  */
 function stripLegacyKeys(cfg) {
-  if (!cfg || !cfg.game || cfg.game.blindLevelOrbits === undefined) return cfg;
-  const out = { ...cfg, game: { ...cfg.game } };
-  delete out.game.blindLevelOrbits;
+  if (!cfg) return cfg;
+  const hasOrbits = cfg.game?.blindLevelOrbits !== undefined;
+  const hasThinking = cfg.ui?.showThinking !== undefined;
+  if (!hasOrbits && !hasThinking) return cfg;
+  const out = { ...cfg };
+  if (hasOrbits) { out.game = { ...cfg.game }; delete out.game.blindLevelOrbits; }
+  if (hasThinking) { out.ui = { ...cfg.ui }; delete out.ui.showThinking; }
   return out;
 }
 

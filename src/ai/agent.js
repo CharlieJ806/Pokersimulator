@@ -265,6 +265,315 @@ function cleanSay(v) {
   return s;
 }
 
+/* ==================================================================== *
+ * 「说出口的那句话」不能漏牌 —— 确定性的第二层
+ * ==================================================================== */
+
+/**
+ * 为什么光靠提示词不够,非要再加这一层确定性检查:
+ *
+ *  ① **模型不遵守是常态**。这个项目已经实测到它把整段带 markdown 的推理
+ *     倒进 `thinking` 字段(所以才有了 cleanThinking)。提示词里写着
+ *     「不要报自己的底牌」,它照样会在 `say` 里说「我拿的是 A♦10♦」。
+ *  ② **要求本身有张力**。提示词同时要求它「可以诈唬、可以放狠话」,
+ *     而诈唬最顺手的一句就是「我这可是葫芦」—— 让它自己拿捏这条边界,
+ *     等于每一手都赌一次它守不守规矩。
+ *  ③ **这是公平性问题,不是文风问题**。玩家模式下 `say` 是给人类玩家看的:
+ *     如实报出自己的牌 = 白送信息。这种规则必须是**确定性**的,
+ *     不能靠模型自觉 —— 它不老实的时候,用户根本看不出来自己白赚了信息。
+ *
+ * 所以分两层:提示词负责「尽量别让它想说」(见 buildSystemPrompt 的 say 一节),
+ * 这里负责「真说了就一定拦」。
+ *
+ * 处理方式是**整句丢掉**(置空),不是改写 —— 改写要另生成一句话,新句子里
+ * 再长出新的泄漏就没人管了;而 `say` 本来就是可选的(提示词明确允许
+ * 「这手不说话」,界面把空串当「没说话」),所以丢掉是最安全的降级。
+ *
+ * ⚠️ 只碰 `say`。`thinking` 是**私密推理**(玩家模式才藏,荷官模式要展示),
+ *    提示词对它的要求正好相反 —— 那里必须说真牌力,所以绝不能拿这套规则
+ *    去过滤它(它只有 cleanThinking 的格式清洗)。两件事别混。
+ *
+ * ---------------------------------------------------------------------
+ * 规则(拦什么 / 放什么 / 边界怎么定)
+ * ---------------------------------------------------------------------
+ * 判据全部来自**引擎已经知道的事实**(view.me.hole / view.board),
+ * 不猜、不联网、不看模型自己说了什么。五条:
+ *
+ *  ① 具体牌张(点数 + 花色,如 `A♦`):命中自己的底牌 → 拦,**无豁免**。
+ *     底牌不可能同时是公共牌,所以这张牌被说出口只可能是报牌。
+ *     花色字母写法(`Ad` / `10c`)、全角、夹空格的写法都会先归一化。
+ *
+ *  ② 只写点数(「我有 A 高」):该点数在自己底牌里 → 按顺序判:
+ *       · 归属于**别人**(「他八成有 A」)           → 放行(读牌,不是报牌);
+ *       · 归属于**自己**(「我有 A 高」)             → 拦;
+ *       · 公共牌上**有**这个点数(「这张 10 不好办」) → 放行(公共信息);
+ *       · 其余(只有自己知道这个点数)               → 拦。
+ *     「归属」只看紧挨在「我/俺/咱」后面的持有句式(中间只允许「拿了/中了个」
+ *     这类连接字);紧挨「他/她/对手」就归给别人。刻意保守:判不清归属时
+ *     **不**当成报牌,而是落到「公共牌上有就放行」那条 —— 免得把
+ *     「我猜他有 A」这种正经读牌拦掉。
+ *
+ *  ③ 只写花色(「方块」):同②的顺序。花色单独说出来的信息量本来就低,
+ *     真正的判据是「这个花色在公共牌上一张都没有」—— 公共牌上看得见的花色
+ *     是公开信息,只有自己知道的花色才是秘密。
+ *
+ *  ④ 自己**实际**的成牌名(describe 的结果):类别词命中 → 拦,
+ *     同样放行明确归属别人的那句(「他八成是葫芦」是读牌)。
+ *     ⚠️ 只拦**真实**牌型。**说谎是允许的**:手里是空气却说「我是葫芦」
+ *        不拦 —— 那不是漏牌,是在制造错误信息,正是这个字段要的心理战;
+ *        连谎话一起拦掉,等于把诈唬台词也禁了。
+ *     ⚠️ 短牌必须传 { shortDeck }:同一个牌型在短牌/标准里名字不同
+ *        (A6789 在短牌是顺子、在标准只是 A 高),传错了两个方向都会判错。
+ *
+ *  ⑤ 翻前(board 为空)把**底牌结构**说出来:真的同花却说「同花」、
+ *     真的对子却说「对子」→ 拦。翻前没有公共牌,这些话只能是在描述自己那两张。
+ *
+ * 已知取舍(有意为之,不是 bug):
+ *  · 公共牌上有的点数默认放行,但**被「我」的持有句式绑住时照样拦**
+ *    (公共牌有 10、手里也有 10,说「我中了个 10」就是报牌)。
+ *  · 「他顶多一对」这种读牌,在自己正好是一对时也会被拦 —— 读牌句式只在
+ *    明确带「他/她/对手」时才放行。少说一句的代价远小于漏一次牌。
+ *  · 成牌名一律用 describe(与摊牌判定同一套),不自己数牌 —— 否则
+ *    界面摊牌时显示的牌型名和这里判的会是两个说法(这个仓库栽过)。
+ */
+
+/** 花色符号:0=♠ 1=♥ 2=♦ 3=♣(与 cards.js 的 suitOf 一致) */
+const SUIT_LETTER = { s: '♠', h: '♥', d: '♦', c: '♣' };
+
+/** 一个花色可能被写成的几种样子(符号 + 常见中文叫法) */
+const SUIT_WORDS = [
+  ['♠', '黑桃'],
+  ['♥', '红桃', '红心'],
+  ['♦', '方块', '方片'],
+  ['♣', '梅花', '草花'],
+];
+
+/**
+ * 自己**实际**成牌类别的常见说法。
+ *
+ * 键用 categoryKey 的名字(与 handEval 的英文类别一一对应),值是中文说法。
+ * ⚠️ 只收「说了就等于报牌」的词:不收单个「对」「花」「顺」——
+ *    那些在「打法很对」「花招」「顺手」里都会出现,误伤面太大。
+ */
+const HAND_WORDS = {
+  high_card: ['高牌'],
+  one_pair: ['一对', '顶对', '超对', '中对', '底对', '口袋对', '对子'],
+  two_pair: ['两对', '双对', '两双'],
+  three_of_a_kind: ['三条', '暗三', '明三'],
+  straight: ['顺子'],
+  flush: ['同花'],
+  full_house: ['葫芦', '满堂红', '俘虏'],
+  four_of_a_kind: ['四条', '金刚'],
+  straight_flush: ['同花顺', '皇家同花顺'],
+};
+
+/** 点数 token 的规范写法:T → 10,小写字母 → 大写 */
+function rankNorm(r) {
+  const t = String(r).toUpperCase();
+  return t === 'T' ? '10' : t;
+}
+
+/**
+ * 把发言归一化成「便于扫牌」的形式。
+ * 三条都是为了**别漏**:
+ *  · 全角 → 半角(NFKC):模型偶尔写全角「Ａ♦」;
+ *  · 空白全去:它爱写「A ♦」「10 10」,留着空格就扫不到;
+ *  · 花色字母写法 → 符号,但**只在紧跟点数时**换(Ad / 10c / Kh),
+ *    否则英文单词里的 s / d 也会被换掉。
+ */
+function normalizeForScan(raw) {
+  let t = String(raw || '');
+  try { t = t.normalize('NFKC'); } catch { /* 老引擎没有 normalize:中文与牌面符号不受影响 */ }
+  t = t.replace(/[\s\u3000]+/g, '');
+  return t.replace(/(10|[2-9]|[AJQKajqkTt])([shdcSHDC])(?![A-Za-z])/g,
+    (m, r, su) => rankNorm(r) + SUIT_LETTER[su.toLowerCase()]);
+}
+
+/**
+ * 切出文本里所有「点数 token」及它们的位置。
+ *
+ * 难点全在**别把数字当点数**:
+ *  · 「跟20」「加到100」是金额,不是牌 —— 数字点数后面还跟着数字的,不算;
+ *  · 但「A10」里的 A 后面跟数字是正常的(那是两张牌),所以这条只管数字点数;
+ *  · 花色符号在这儿是天然的分隔符(归一化后 `A♦10♦` 会被切成 `A` / `10`)。
+ */
+function rankTokens(text) {
+  const out = [];
+  const RE = /[0-9A-Za-z]+/g;
+  let m;
+  while ((m = RE.exec(text))) {
+    const run = m[0], base = m.index;
+    for (let i = 0; i < run.length;) {
+      const ch = run[i];
+      if (run.slice(i, i + 2) === '10') {
+        // 「1020」这种更长的数字不是点数
+        if (!/[0-9]/.test(run[i + 2] || '')) out.push({ rank: '10', index: base + i, len: 2 });
+        i += 2; continue;
+      }
+      if (ch === 'T' || ch === 't') { out.push({ rank: '10', index: base + i, len: 1 }); i++; continue; }
+      if (/[2-9AJQKajqk]/.test(ch)) {
+        if (/[0-9]/.test(ch) && /[0-9]/.test(run[i + 1] || '')) { i++; continue; }
+        out.push({ rank: ch.toUpperCase(), index: base + i, len: 1 });
+      }
+      i++;
+    }
+  }
+  return out;
+}
+
+/**
+ * 这个点数说的是「钱」还是「牌」?
+ * 前面是下注动词、后面是钱的单位 → 当成金额放过。
+ * (「跟10看一张」里那个 10 是跟注额,不是底牌 —— 拦掉它属于纯误伤。)
+ * ⚠️ 刻意**不**把单独的「到」算进去:「我拿到10」是拿到一张 10,
+ *    那是报牌,不能因为前面有个「到」就放过。
+ */
+const BET_WORDS_BEFORE = ['跟', '加', '下', '押', '注', '全下', '抬', '赌'];
+const MONEY_WORDS_AFTER = ['块', '元', '万', '筹码', 'bb', 'BB', '个大盲', '大盲', '个盲注', '点'];
+function looksLikeAmount(text, tok) {
+  const before = text.slice(Math.max(0, tok.index - 2), tok.index);
+  const after = text.slice(tok.index + tok.len, tok.index + tok.len + 4);
+  return BET_WORDS_BEFORE.some((w) => before.endsWith(w))
+    || MONEY_WORDS_AFTER.some((w) => after.startsWith(w));
+}
+
+/**
+ * 「我这个/这张」后面接持有的说法 —— 中间只允许这类连接字。
+ * 用它区分「我有A」(报牌)和「我猜他有A」(读牌,归属在「他」那边)。
+ */
+const ME_BIND = /^[的了着有个一两门对张手拿中是成抓来起把现这自己牌头里将收发方块黑桃红心梅片]*$/;
+const BIND_MAX = 6;
+
+/** 归属词:紧挨着它们后面的点数/花色,才认「说的是谁」 */
+const WHO_MARKER = /我|俺|咱|他|她|对手|别人|人家|对方|那人/g;
+const OTHER_MAX_DIST = 8;
+
+/**
+ * 这个 token 是在说自己的牌,还是在读别人的牌?
+ * @returns {'me'|'other'|null} null = 说不清(公共牌、泛指、纯放话)
+ */
+function whoSays(text, index) {
+  let who = null, at = -1;
+  WHO_MARKER.lastIndex = 0;
+  for (let m; (m = WHO_MARKER.exec(text));) {
+    if (m.index >= index) break;
+    who = /^(?:我|俺|咱)$/.test(m[0]) ? 'me' : 'other';
+    at = m.index + m[0].length;
+  }
+  if (!who) return null;
+  const between = text.slice(at, index);
+  if (who === 'other') return between.length <= OTHER_MAX_DIST ? 'other' : null;
+  // 自己:必须是「我 + 持有句式 + 点数」这种紧贴的说法才算报牌
+  return between.length <= BIND_MAX && ME_BIND.test(between) ? 'me' : null;
+}
+
+/** 词 w 在文本里出现的所有位置(同一个人可能先说错再改口) */
+function occurrences(text, w) {
+  const out = [];
+  for (let from = 0; ;) {
+    const at = text.indexOf(w, from);
+    if (at < 0) break;
+    out.push(at);
+    from = at + w.length;
+  }
+  return out;
+}
+
+/** 命中这些词、且不是明确在说别人的 → 返回命中的写法 */
+function hitsSelfWord(text, words) {
+  for (const w of words) {
+    for (const at of occurrences(text, w)) {
+      if (whoSays(text, at) === 'other') continue;
+      return w;
+    }
+  }
+  return null;
+}
+
+/**
+ * 这句话有没有漏自己的牌?
+ *
+ * @param {string} rawSay 已经过 cleanSay 的发言(必须是**最终要显示**的那句)
+ * @param {object} view viewForSeat 的座位视角(只用 me.hole / board / shortDeck)
+ * @returns {null|{kind:string, hit:string, why:string}} null = 没漏,可以照说
+ */
+function detectSayLeak(rawSay, view) {
+  const say = normalizeForScan(rawSay);
+  if (!say) return null;
+
+  const hole = (view?.me?.hole || []).filter((c) => c !== null && c !== undefined);
+  const board = (view?.board || []).filter((c) => c !== null && c !== undefined);
+  const holeRanks = new Set(hole.map((c) => RANK_LABEL[rankOf(c)]));
+  const boardRanks = new Set(board.map((c) => RANK_LABEL[rankOf(c)]));
+  const holeSuits = new Set(hole.map(suitOf));
+  const boardSuits = new Set(board.map(suitOf));
+
+  // ① 具体牌张:命中自己的底牌 → 拦(底牌不可能同时是公共牌,所以没有豁免)
+  for (const c of hole) {
+    const t = cardText(c);
+    if (say.includes(t)) return { kind: 'holeCard', hit: t, why: `说出了自己的底牌 ${t}` };
+  }
+
+  // ② 只写点数
+  for (const tok of rankTokens(say)) {
+    if (!holeRanks.has(tok.rank)) continue;
+    if (looksLikeAmount(say, tok)) continue;
+    const who = whoSays(say, tok.index);
+    if (who === 'other') continue;                    // 「他八成有 A」是读牌
+    if (who === 'me') return { kind: 'rank', hit: tok.rank, why: `说漏了底牌里的点数 ${tok.rank}` };
+    if (boardRanks.has(tok.rank)) continue;           // 公共牌上看得见这个点数
+    return { kind: 'rank', hit: tok.rank, why: `说漏了底牌里的点数 ${tok.rank}(公共牌上没有)` };
+  }
+
+  // ③ 只写花色
+  for (let s = 0; s < 4; s++) {
+    if (!holeSuits.has(s)) continue;
+    for (const w of SUIT_WORDS[s]) {
+      for (const at of occurrences(say, w)) {
+        const who = whoSays(say, at);
+        if (who === 'other') continue;
+        if (who === 'me') return { kind: 'suit', hit: w, why: `说漏了底牌里的花色 ${w}` };
+        if (boardSuits.has(s)) continue;              // 公共牌上有这个花色
+        return { kind: 'suit', hit: w, why: `说漏了底牌里的花色 ${w}(公共牌上一张都没有)` };
+      }
+    }
+  }
+
+  // ④ 自己实际的成牌名
+  //    ⚠️ shortDeck 必须与提示词、摊牌判定用同一个值(见 madeHandText 里那段说明)
+  if (hole.length >= 2 && board.length >= 3) {
+    const shortDeck = !!view?.shortDeck;
+    const score = evaluate([...hole, ...board], { shortDeck });
+    const key = categoryKey(score, { shortDeck });
+    const name = describe(score, { shortDeck });
+    const hit = hitsSelfWord(say, HAND_WORDS[key] || []);
+    if (hit) return { kind: 'madeHand', hit, why: `说漏了自己的成牌「${name}」` };
+    // 高牌的口语说法:「高牌 A」在牌桌上说成「A 高」
+    if (key === 'high_card') {
+      const hw = `${RANK_LABEL[score[1]]}高`;
+      if (occurrences(say, hw).some((at) => whoSays(say, at) !== 'other')) {
+        return { kind: 'madeHand', hit: hw, why: `说漏了自己的成牌「${name}」` };
+      }
+    }
+  }
+
+  // ⑤ 翻前把底牌结构说出来(翻前没有公共牌,「同花 / 对子」只可能是在说自己那两张)
+  if (board.length === 0 && hole.length === 2) {
+    const suited = suitOf(hole[0]) === suitOf(hole[1]);
+    const paired = rankOf(hole[0]) === rankOf(hole[1]);
+    if (suited) {
+      const hit = hitsSelfWord(say, ['同花', '同色', '一个花色', '一样的花色']);
+      if (hit) return { kind: 'preflopShape', hit, why: '翻前报了自己的底牌是同花' };
+    }
+    if (paired) {
+      const hit = hitsSelfWord(say, ['对子', '口袋对', '一对']);
+      if (hit) return { kind: 'preflopShape', hit, why: '翻前报了自己的底牌是对子' };
+    }
+  }
+
+  return null;
+}
+
 /**
  * `thinking` 的长度上限(字)。
  *
@@ -843,17 +1152,26 @@ class PokerAgent {
       '硬性要求:',
       '· **不超过 20 个字**,像牌桌上随口说的一句,不要解释、不要复述规则。',
       '· **必须和你这次的动作对得上**:弃牌就别喊加注,跟注别喊「我不玩了」。',
-      '· 只说你自己知道的(你的底牌、你的读牌),**不要报别人的底牌**。',
+      '· **不要报别人的底牌**(你看不到),也不要替别人说话。',
       '',
-      '内容可以是真的,也可以是**心理战** —— 这正是这个字段的用处:',
-      '· 手里是坚果,可以装作犹豫:「这注有点大啊……」',
-      '· 手里是空气,可以放狠话:「我劝你别跟。」',
+      '⚠️ **最要紧的一条:不要把自己的牌报出来 —— 那等于白送给对手。**',
+      '· **不要说出自己底牌的点数或花色**:「我拿的是 A♦」「我有 A 高」这种话**绝对不许说**;',
+      '· **也不要说自己实际成了什么牌**:「我是两对」「葫芦别跟了」这种话**同样不许说** ——',
+      '  就算你是想拿它吓唬人也不行,换个模糊的说法,别把真牌力说出口。',
+      '这一条没有例外:诈唬可以,报自己的真牌不行。',
+      '',
+      '那还能说什么?下面这些都可以,而且正是这句话的用处:',
+      '· **公共牌**是所有人看得见的,随便聊:「这张 10 不好办」「牌面很干」;',
+      '· **读别人**也可以:「他那个加注像是有牌」「我猜他在诈唬」—— 说你的猜测,不是报自己的牌;',
+      '· **心理战**是核心技能:手里是坚果可以装作犹豫「这注有点大啊……」,',
+      '  手里是空气可以放狠话「我劝你别跟。」—— **可以虚张声势,但只能用模糊的话**,',
+      '  不能靠报出自己的底牌或真实牌型来吓人;',
       '· 也可以只是中性的一句:「跟了。」「过。」',
       '说什么由你的性格决定:诈唬型爱放话,保守型话少。',
       '**不想说话就留空字符串 ""** —— 连话都不说也是一种风格,不用每手都开口。',
       '',
       '【输出格式】(严格 JSON,不要 markdown 代码块)',
-      '{"thinking":"一到两句中文,40 字以内","say":"牌桌上说的一句话,20 字以内,可留空","action":"fold|check|call|raise","amount":数字}',
+      '{"thinking":"一到两句中文,40 字以内","say":"牌桌上说的一句话,20 字以内,可留空,但绝不能报自己的底牌或牌型","action":"fold|check|call|raise","amount":数字}',
       '说明:check / call / fold 时 amount 可省略;raise 时 amount 是「加注到」的目标总额(不是增量)。想全下就把 amount 写成你的最大可用额。',
     ].filter(Boolean).join('\n');
   }
@@ -1333,7 +1651,10 @@ class PokerAgent {
       const d = fallbackDecide(view, this.persona);
       this.stats.fallback++;
       const thinking = `(本地策略)${d.note || ''}`.trim();
-      return { action: d.action, amount: d.amount, thinking, say: localSay(d.action), source: 'fallback' };
+      // 本地那几句(LOCAL_SAY)是写死的中性短句,本来就不可能漏牌 —— 但两条路径
+      // 都过同一层,免得将来改 LOCAL_SAY 时忘了这条规矩(这个仓库「两条路径
+      // 各写一份,测试全绿、线上没生效」已经栽过两次)。
+      return { action: d.action, amount: d.amount, thinking, say: this._cleanSayForView(localSay(d.action), view), source: 'fallback' };
     };
 
     if (!this.cfg?.endpoint || (!this.cfg?.apiKey && !this.cfg?.noKey)) {
@@ -1453,6 +1774,36 @@ class PokerAgent {
   }
 
   /**
+   * `say` 的完整处理:先 cleanSay(去引号 / 压空白 / 24 字上限),
+   * 再跑一次漏牌检测(见文件上面 detectSayLeak 那一大段)。
+   *
+   * 顺序**不能**反:cleanSay 会把话截到 24 字,截断后可能只剩半个牌张
+   * (「我拿的是 A♦10♦…」被截成「我拿的是 A」)—— 检测必须按
+   * **最终要显示的那句话**判,否则拦下的和显示的不是同一句。
+   *
+   * 检测挂了也**宁可不说**:say 本来就是可选的,漏牌的代价(白送信息)
+   * 远大于少一句话;但必须留下痕迹 —— 否则「桌上忽然都不说话了」
+   * 会被当成别的问题去查(比如以为模型坏了)。
+   *
+   * @returns {string} 可以显示的发言;被拦掉 / 空值时是 ''
+   */
+  _cleanSayForView(rawSay, view) {
+    const say = cleanSay(rawSay);
+    if (!say) return '';
+    let leak = null;
+    try {
+      leak = detectSayLeak(say, view);
+    } catch (err) {
+      this.hooks.onDebug?.(`[座位${this.seat + 1}][say] 漏牌检测异常(按漏牌处理,这句丢掉):${err?.message || err}`);
+      return '';
+    }
+    this.lastSayLeak = leak || null;
+    if (!leak) return say;
+    this.hooks.onDebug?.(`[座位${this.seat + 1}][say] 拦掉一句会漏牌的发言(${leak.why}):${JSON.stringify(say)}`);
+    return '';
+  }
+
+  /**
    * 把模型输出解析成决策 —— **只此一处**。
    *
    * 抽出来是为了让「两条调用路径 + 重试」都只经过同一份解析:
@@ -1470,7 +1821,9 @@ class PokerAgent {
       //    (界面那层只清 JSON 语法与英文格式指令,不认 markdown)。
       //    详见 cleanThinking 的注释。
       thinking = cleanThinking(parsed.thinking ?? parsed.reasoning ?? parsed.reason ?? '');
-      say = cleanSay(parsed.say ?? parsed.speech ?? parsed.talk ?? parsed.line);
+      // ⚠️ say 比 thinking 多一层**漏牌检测**(清洗之后跑,见 _cleanSayForView):
+      //    thinking 是私密的,说真牌力没问题;say 是要给玩家看的,报牌就是白送信息。
+      say = this._cleanSayForView(parsed.say ?? parsed.speech ?? parsed.talk ?? parsed.line, view);
       action = normalizeActionWord(parsed.action ?? parsed.move ?? parsed.decision);
       amount = Number(parsed.amount ?? parsed.raiseTo ?? parsed.to ?? parsed.bet ?? 0) || undefined;
     } else {
@@ -2067,4 +2420,4 @@ class PokerAgent {
   }
 }
 
-export { PokerAgent, fallbackDecide, preflopStrength, extractJson, normalizeActionWord, ACTION_LABEL, evaluate, describe, categoryKey, cleanThinking, classifyLlmFailure, resolveRetryPolicy, LLM_RETRY };
+export { PokerAgent, fallbackDecide, preflopStrength, extractJson, normalizeActionWord, ACTION_LABEL, LOCAL_SAY, evaluate, describe, categoryKey, cleanThinking, cleanSay, detectSayLeak, classifyLlmFailure, resolveRetryPolicy, LLM_RETRY };

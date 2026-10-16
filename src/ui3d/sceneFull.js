@@ -83,9 +83,14 @@ export class SceneTable {
           <div class="topbar__center"><span class="street" id="streetTag">等待开局</span></div>
           <div class="topbar__right">
             <!-- 文字包在 .btn__label 里:手机上只留图标(mobile.css),
-                 否则六个按钮横向放不下,右边的「设置」会被挤出屏幕、点不到 -->
+                 否则按钮横向放不下,右边的「设置」会被挤出屏幕、点不到。
+                 ⚠️ 这里原来还有一个「💭 气泡 开/关」按钮(#btnThink),现在删掉了:
+                 ① 它控制的是「气泡里显不显示思考文字」,而那个行为已经**固定成开**
+                    (见 app.js 里 stepOnce 的 onThink / thinkingText,已经没有那个判断了);
+                 ② 顶栏在手机上本来就横向溢出,少一个按钮就少一份宽度 ——
+                    用户实测「最右边的按钮要靠盲滑才点得到」,减宽是直接解法。
+                 别再把它加回来:气泡没有「关掉」这个需求,而宽度是手机上最紧的资源。 -->
             <button class="btn btn--ghost" id="btnPeek" title="切换底牌可见度:盖着 → 只看公共牌 → 全部翻开">🂠<span class="btn__label"> 底牌 <b>盖着</b></span></button>
-            <button class="btn btn--ghost" id="btnThink" title="是否显示 AI 的思考气泡">💭<span class="btn__label"> 气泡 <b>开</b></span></button>
             <button class="btn btn--ghost" id="btnThinkLog" title="完整的思考记录">🧠<span class="btn__label"> 思考记录</span></button>
             <button class="btn btn--ghost" id="btnModels" title="给每个 AI 分配不同的模型">🤖<span class="btn__label"> 模型</span></button>
             <button class="btn btn--ghost" id="btnLog" title="牌局日志">📜<span class="btn__label"> <span id="logBtnLabel">荷官记录</span></span></button>
@@ -207,7 +212,7 @@ export class SceneTable {
       hint: q('hintEl'), toast: q('toastEl'), sidePanel: q('sidePanel'),
       actionbar: root.querySelector('.actionbar'),
       btnDeal: q('btnDeal'), btnNext: q('btnNext'), btnMode: q('btnMode'), btnSpeed: q('btnSpeed'),
-      btnPeek: q('btnPeek'), btnThink: q('btnThink'), btnThinkLog: q('btnThinkLog'),
+      btnPeek: q('btnPeek'), btnThinkLog: q('btnThinkLog'),
       btnModels: q('btnModels'), btnLog: q('btnLog'), btnSetup: q('btnSetup'),
       logBtnLabel: q('logBtnLabel'), tabLog: q('tabLog'),
       btnClearLog: q('btnClearLog'),
@@ -821,9 +826,9 @@ export class SceneTable {
     const isPlayer = mode === 'player';
     document.body.classList.toggle('is-player-mode', isPlayer);
 
-    // 底牌三态 / 气泡开关 / 思考记录 —— 这些都是荷官专属的
+    // 底牌三态 / 思考记录 —— 这些都是荷官专属的
+    // (原来这里还藏过「气泡开关」,那个按钮已删,见顶栏模板里的说明)
     if (this.dom.btnPeek) this.dom.btnPeek.hidden = isPlayer;
-    if (this.dom.btnThink) this.dom.btnThink.hidden = isPlayer;
     if (this.dom.btnThinkLog) this.dom.btnThinkLog.hidden = isPlayer;
     // 「下一位」是荷官控节奏用的;玩家模式下节奏由自己的操作驱动
     if (this.dom.btnNext) this.dom.btnNext.hidden = isPlayer;

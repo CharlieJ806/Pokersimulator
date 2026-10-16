@@ -191,7 +191,13 @@ export class GameApp {
     this.debugErrors = [];
     this.localOnly = false;
 
-    this.ui = { showThinking: true, deckView: 'down' };
+    // ⚠️ 这里原来有 showThinking(气泡里显不显示思考文字的可切开关)。
+    //    已经删掉了:顶栏那个「💭 气泡 开/关」按钮和设置里的「显示思考气泡」都是它的入口,
+    //    而它的语义只是「气泡里显不显示文字」—— 不是「气泡显不显示」。
+    //    气泡本身的显隐由 ctx().revealThinking 决定(荷官看内容、玩家只看「正在思考中…」),
+    //    那是**信息隔离**,不是偏好设置,不能跟着这个开关走。
+    //    现在思考文字恒为「显示」,所以这个字段没有存在意义了,删掉而不是留成死字段。
+    this.ui = { deckView: 'down' };
     this.deckView = 'down';        // down 全部盖着 | board 只看公共牌 | up 全部翻开(荷官特权)
     this.thinkLive = false;        // 气泡是否正停在「等你点下一位」
     // 摊牌胜率(只有荷官模式才有值,玩家模式恒为 null —— 见 ensureEquity)
@@ -1351,7 +1357,9 @@ export class GameApp {
       onThink: (_delta, full, isReasoning) => {
         if (isReasoning) return;          // 思维链不进界面
         streamed = full || '';
-        if (!this.ui.showThinking) return;
+        // 以前这里有一句 `if (!this.ui.showThinking) return;` ——
+        // 那是「气泡只显示正在思考中、不显示文字」的开关。现在恒为显示,
+        // 所以直接往下走(别再引入任何条件:文字有没有得看,只由模型的输出决定)。
         // JSON 还没长完时可能抠不出内容,那就先让界面显示「正在思考中…」
         this.thinkingText = tidyThinking(streamed);
         this.renderSeatOnly(seat);
@@ -1377,6 +1385,17 @@ export class GameApp {
         this.table.toast(`${agent.name}${model} 调用失败,本手先用本地策略:${msg.slice(0, 90)}`, 'warn', 5200);
         this.table.pushLog({ kind: 'info', text: `⚠ ${agent.name}${model} 调用失败:${msg.slice(0, 300)}` });
       },
+      /**
+       * 调试痕迹(onDebug)。
+       *
+       * 它记的是那些「用户看不出来、事后却需要解释」的降级 —— 目前主要是
+       * **发言被拦掉**:模型的 say 报了自己的底牌/牌型,agent 把整句丢掉了
+       * (见 agent.js 的 detectSayLeak)。
+       * 刻意不弹 toast、也不进牌局记录:那不是错误,气泡安静一下本来就允许
+       * (提示词明确写了「不想说话就留空」)。只有排查「为什么这手它没说话」
+       * 时才需要它,所以和「动作被拒」那些诊断信息收在一起。
+       */
+      onDebug: (m) => { (this.debugErrors ||= []).push(String(m)); },
     };
 
     const t0 = Date.now();
@@ -1397,7 +1416,10 @@ export class GameApp {
     if (!finalThink) {
       finalThink = '（这次模型没给出可读的思考）';
     }
-    this.thinkingText = this.ui.showThinking ? finalThink : '';
+    // 恒为显示:这个字段原来叫 showThinking,是「气泡里给不给文字」的开关,
+    // 现在没有开关了,直接赋值 —— 行为与「开关处于开」时逐字一致
+    // (关掉时这里会被写成空串,气泡退回「正在思考中…」;那条分支已随开关一起删掉)。
+    this.thinkingText = finalThink;
     this.thinkingSeat = seat;
     this.thinkingLive = true;
     this.render();
@@ -1547,10 +1569,8 @@ export class GameApp {
     btn.innerHTML = `${VIEW_ICON[this.deckView] || '🂠'}<span class="btn__label"> 底牌 <b>${VIEW_LABEL[this.deckView] || '盖着'}</b></span>`;
     btn.classList.toggle('is-active', this.deckView === 'up');
 
-    const t = this.table.dom.btnThink;
-    t.innerHTML = `💭<span class="btn__label"> 气泡 <b>${this.ui.showThinking ? '开' : '关'}</b></span>`;
-    t.classList.toggle('is-active', this.ui.showThinking);
-
+    // ⚠️ 气泡开关按钮(#btnThink)已删:顶栏这里原来负责刷新它的「开/关」文字与高亮。
+    //    不用补占位语句 —— 它没有替代物,思考文字恒为显示。
     const m = this.table.dom.btnMode;
     const info = MODE_INFO[this.flow.mode];
     m.innerHTML = `${info.icon} ${info.label}`;
@@ -1841,13 +1861,10 @@ export class GameApp {
 
     d.btnModels.addEventListener('click', () => this.openModelsPanel());
 
-    d.btnThink.addEventListener('click', async () => {
-      this.ui.showThinking = !this.ui.showThinking;
-      this.syncTopbar();
-      await this.saveConfig({ ui: { showThinking: this.ui.showThinking } });
-      this.render();
-    });
-
+    // ⚠️ 「💭 气泡 开/关」按钮的监听已删(按钮本身也删了,见 sceneFull.js 顶栏模板)。
+    //    它原来做的是 `this.ui.showThinking = !showThinking` + saveConfig。
+    //    现在思考文字恒为显示,没有任何东西可切 —— 别在这里补一个空监听,
+    //    那只会让人以为按钮还在。
     d.btnThinkLog.addEventListener('click', () => {
       this.table.setSidePanelOpen(true);
       this.table.setPanel('think');
