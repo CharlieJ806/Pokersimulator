@@ -65,6 +65,13 @@ const DEFAULT_CONFIG = {
     ante: 0,
     bigBlindAnte: false,
     blindLevelUp: false,
+    // 每多少**手**按档位表升一档(0 = 不按档位升盲)。
+    // ⚠️ 单位改过一次:上一版是「个人回合(orbit)」,用户实测指出不对(9 人桌设 3
+    //    = 每 27 手才升一档),现在按手算,与人数无关。默认 20,推导见
+    //    engine.js 的 BLIND_LEVEL_HANDS。
+    // ⚠️ 与 config.cjs 的默认值必须一致,否则「网页版一开局就升档、桌面版不升」这类
+    //    差异没人查得出来(同一个坑在 reasoningLevel / timeoutMs 上踩过)。
+    blindLevelHands: 20,
     blindUpEvery: 0,
     humanSeat: null,
   },
@@ -93,11 +100,25 @@ function deepMerge(base, extra) {
 
 /* ------------------------------------------------------------ 存储 */
 
+/**
+ * 清掉已废弃的配置键(game.blindLevelOrbits)。
+ *
+ * 与桌面版 config.cjs 的 stripLegacyKeys 同一份规矩:**只删键、不迁移数值** ——
+ * 旧值是在「个人回合」这个错单位下填的,乘人数会造出一个用户从没打算要的数字。
+ * 两端的迁移规则必须一致,否则「网页版还认旧键、桌面版不认」这种差异没人查得出来。
+ */
+function stripLegacyKeys(cfg) {
+  if (!cfg || !cfg.game || cfg.game.blindLevelOrbits === undefined) return cfg;
+  const out = { ...cfg, game: { ...cfg.game } };
+  delete out.game.blindLevelOrbits;
+  return out;
+}
+
 function readConfig() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return JSON.parse(JSON.stringify(DEFAULT_CONFIG));
-    return deepMerge(DEFAULT_CONFIG, JSON.parse(raw));
+    return stripLegacyKeys(deepMerge(DEFAULT_CONFIG, JSON.parse(raw)));
   } catch {
     return JSON.parse(JSON.stringify(DEFAULT_CONFIG));
   }

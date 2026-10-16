@@ -20,6 +20,7 @@
  * ============================================================ */
 
 import { PokerEngine } from '../core/engine.js';
+import { createEquityRun, DEFAULT_SAMPLES } from '../core/equity.js';
 import { SceneTable, fmt } from '../ui3d/sceneFull.js';
 import { createSetup } from '../ui3d/setup3d.js';
 import { characterForModel, assignAccents, assignDisplayNames, displayNameForModel, GENERIC_CHAR } from '../ai/portraits.js';
@@ -37,6 +38,18 @@ import { PokerAgent } from '../ai/agent.js';
 import { kindForProtocol, normalizeReasoningLevel } from '../shared/llmStream.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, Math.max(0, ms)));
+
+/**
+ * 摊牌胜率的采样预算。
+ *
+ * 一次蒙特卡洛的成本 ≈ 采样数 × 参与人数 × 40µs(7 张牌评估,桌面实测),
+ * 所以**按人数反推采样数**:人越多,每人分到的样本越少,总耗时封顶。
+ * 6000 次评估 ≈ 0.25s(桌面),手机上再慢几倍 —— 但它跑在空闲时间片里
+ * (见 pumpEquity),不占渲染那几帧。
+ */
+const EQUITY_EVAL_BUDGET = 6000;
+/** 采样数下限:低于这个数误差大到没脸显示(±3% 以上) */
+const EQUITY_MIN_SAMPLES = 600;
 
 /** 街道名 → 中文(顶栏显示用) */
 const STREET_TEXT = {
@@ -181,6 +194,10 @@ export class GameApp {
     this.ui = { showThinking: true, deckView: 'down' };
     this.deckView = 'down';        // down 全部盖着 | board 只看公共牌 | up 全部翻开(荷官特权)
     this.thinkLive = false;        // 气泡是否正停在「等你点下一位」
+    // 摊牌胜率(只有荷官模式才有值,玩家模式恒为 null —— 见 ensureEquity)
+    this.equity = null;            // { pct: Map<座位, 0..1>, exact, samples, ties }
+    this._eqSig = '';              // 上次计算对应的状态签名(一样就不重算)
+    this._eqRun = null;            // 正在按时间片推进的模拟
     this.gameSettings = null;
     // AI 的记性:每几手写一次读人笔记(0 = 不写、不记忆)
     this.notesEvery = 3;
@@ -251,6 +268,21 @@ export class GameApp {
       onStart: (values) => this.applyGameSettings(values),
       onExitHome: () => this.exitToHome(),
       onModels: () => this.openModelsPanel(),
+      // 升盲周期(每 N 手按档位表升一档)是个例外:它只决定「这一手打完要不要升档」,
+      // 不参与任何一注的计算,所以局中改它**不必重开一局**(其他规则改了都要重发筹码,
+      // 见 applyGameSettings)。这里直接打到正在跑的引擎上;点「应用」时仍然会照常写进配置
+      // (下次开局面还是它)。
+      onBlindLevelHands: (n) => {
+        // 还没开局(在主页设置页改的):什么都不用做 —— 「开始 / 保存」会把整份设置写进配置
+        if (!this.engine) return;
+        const v = this.engine.setBlindLevelHands(n);
+        // 主页那个设置页是另一份 DOM,把这一格也同步过去 ——
+        // 否则它显示的是旧值,下次点「开始」会把旧值写回配置,把刚调好的节奏悄悄撤掉
+        this.setup.setBlindLevelHands(v);
+        // 局中就地改的也要落盘:不然「改完直接关掉抽屉」会丢,
+        // 下一局又变回旧周期(而设置面板里显示的却是新值 —— 最难查的那种不一致)
+        this.saveConfig({ game: { blindLevelHands: v } });
+      },
     });
 
     // 按座位分配模型
@@ -652,6 +684,10 @@ export class GameApp {
         reasoningLevel: normalizeReasoningLevel(cfg?.reasoningLevel),
         timeoutMs: cfg?.timeoutMs,
         maxTokens: cfg?.maxTokens,
+        // 重试策略(times / backoffMs / budgetMs / classifyErrors)也要顺着
+        // 「界面 → 配置 → agentCfg → agent」这条链走 —— 漏传就又变成一个死字段,
+        // 用户在配置里怎么改都没反应(见上面那段 ⚠️)。
+        llmRetry: cfg?.llmRetry,
       };
     }
 
@@ -669,6 +705,7 @@ export class GameApp {
       kind: p?.kind || 'openai',
       timeoutMs: cfg?.timeoutMs,
       maxTokens: cfg?.maxTokens,
+      llmRetry: cfg?.llmRetry,   // 与上面中转站那条路同一个字段(理由见那里)
     };
   }
 
@@ -719,7 +756,13 @@ export class GameApp {
       ante: g.bigBlindAnte ? 0 : g.ante,     // 大盲前注和普通前注二选一
       bigBlindAnte: !!g.bigBlindAnte,
       blindLevelUp: !!g.blindLevelUp,
+      // ★ 每 N **手**按档位表升一档的周期(设置面板里那一格)。
+      //   默认 20 = 引擎里的 BLIND_LEVEL_HANDS,漏传的话引擎自己也会回落成 20,
+      //   但这里显式给一份,免得「配置项写了没接到使用处」那种坑又出现。
+      blindLevelHands: g.blindLevelHands ?? 20,
       shortDeck: g.shortDeck,
+      // 「每 N 手翻倍」:引擎能力保留、界面入口已撤掉;配置里是什么就传什么(默认 0 = 不升盲)。
+      // 这里以前写成 `g.blindUpEvery || 0`,把 undefined 也收成 0,是安全的。
       blindUpEvery: g.blindUpEvery || 0,
       // 玩家模式:人坐 0 号位(座位名后面会被 persona 覆盖)
       humanSeat: this.mode === 'player' ? (this.playerSeat ?? 0) : null,
@@ -773,7 +816,13 @@ export class GameApp {
       if (seat === human) this.agents.delete(seat);
     }
     this.syncAgents();
-    this.engine.onLog = (entry) => this.table.pushLog(entry);
+    this.engine.onLog = (entry) => {
+      this.table.pushLog(entry);
+      // 升盲是「牌局条件变了」:顶栏的档位会跟着更新,但人正盯着牌桌,
+      // 只写进侧栏日志很容易被错过(实测有人打完一局都没发现有升盲)——
+      // 所以额外弹一次提示。两个升盲模式都走 kind='level',这里就都能提示到。
+      if (entry.kind === 'level') this.table.toast(`📈 ${entry.text}`, 'warn', 2600);
+    };
     this.buildPortraits();
     this.syncTopbar();
   }
@@ -901,6 +950,11 @@ export class GameApp {
     this.thinkingSeat = null;
     this.thinkingText = '';
     this.thinkingLive = false;
+    // 胜率那一轮也一起扔掉:generation 变了,pumpEquity 的旧时间片会自己退出,
+    // 但把引用清掉更彻底(否则它会一直挂在空闲回调队列里)
+    this._eqRun = null;
+    this._eqSig = '';
+    this.equity = null;
     try { this.abort?.abort(); } catch { /* ignore */ }
     this.abort = new AbortController();
     this.flow.abort();
@@ -1309,6 +1363,15 @@ export class GameApp {
         const model = agent.cfg?.model ? `(${agent.cfg.model})` : '';
         if (e.level === 'info') {
           this.table.toast(`${agent.name}${model}:${msg}`, 'info', 3200);
+          /**
+           * 重试这类「还没失败、只是慢」的消息也要进牌局记录。
+           *
+           * 为什么:重试期间界面上只有一个「思考中」,用户看不到任何进展时
+           * 会以为桌子卡住了(他对「等了很久没反应」非常敏感)。toast 3.2 秒就消失,
+           * 记录里留一行才能事后确认「刚才那手是在重试第 2 次,不是死机」。
+           * 只对带 retry 标记的消息记(参数降级成功那句不记,免得记录被刷屏)。
+           */
+          if (e.retry) this.table.pushLog({ kind: 'info', text: `↻ ${agent.name}${model}:${msg}` });
           return;
         }
         this.table.toast(`${agent.name}${model} 调用失败,本手先用本地策略:${msg.slice(0, 90)}`, 'warn', 5200);
@@ -1525,6 +1588,9 @@ export class GameApp {
     const handOver = st.handOver;
     const showdown = st.lastResult?.type === 'showdown' && handOver;
     const isPlayer = this.mode === 'player';
+    // 胜率是「状态变了才重算」的,而 ctx() 是所有渲染路径（render / renderIdle /
+    // renderSeatOnly）的必经之路 —— 把「要不要重算」挂在这里,就不会漏掉哪条路径。
+    this.ensureEquity();
     return {
       // 三态语义:
       //   up    → 全部翻开(荷官特权)
@@ -1555,8 +1621,138 @@ export class GameApp {
         ? st.lastResult.winners?.map((w) => w.seat) : null,
       showdownReveal: !isPlayer && showdown && this.deckView !== 'board',
       humanSeat: st.humanSeat,
+      // 摊牌胜率:**只有荷官模式有值**(玩家模式恒为 null,ensureEquity 里就没算)。
+      // 它是纯显示层数据,不进 AI 的提示词、不影响任何决策。
+      equity: this.equity,
+      // 「正在算」也告诉界面 —— 否则刚发完牌那零点几秒里什么数字都没有,
+      // 看着像功能没生效。
+      equityPending: !!this._eqRun,
       ...extra,
     };
+  }
+
+  /* ------------------------------------------------------------ 摊牌胜率 */
+
+  /**
+   * 每个人的「此刻全部亮牌」赢牌概率(只给荷官看)。
+   *
+   * 为什么放在这里、而不是每帧算:
+   *   · 一次模拟要评估「样本数 × 人数」手 7 张牌(≈40µs/次),
+   *     9 人桌 1500 样本差不多 0.55s —— 每帧算等于把牌桌卡死;
+   *   · 所以先用**状态签名**判断「该不该重算」:只有发牌 / 翻牌 / 转牌 / 河牌 /
+   *     有人弃牌这些真正影响胜率的事才会换签名。下注、跟注、思考吐字都不换。
+   *   · 换了签名也不一次算完:pumpEquity() 把它拆成若干时间片,在空闲回调里跑。
+   *
+   * ⚠️ 玩家模式绝不显示:玩家能看到所有人的胜率,这局就没意义了。
+   *    判断顺序是有意的 —— **先判模式,再读底牌**。玩家模式下下面那段读 p.hole
+   *    的代码根本不会执行(引擎 state 就在同一个进程里,读不读是我们的选择)。
+   *    两道判断缺一不可:this.mode 是界面模式,st.humanSeat 是引擎口径,
+   *    而 viewForDealer() 正是在 humanSeat 不为 null 时把别人的底牌抹成 [null,null]。
+   */
+  ensureEquity() {
+    const st = this.engine?.state;
+    if (!st) return;
+    const dealer = this.mode === 'dealer'
+      && (st.humanSeat === null || st.humanSeat === undefined)
+      && !st.handOver && st.street !== 'idle';
+
+    // 参与者:还在牌局里、没弃牌、两张底牌都拿到了
+    let contenders = [];
+    // 死牌 = 烧牌 + 「已知但不参与摊牌」的底牌(也就是弃牌者的牌)
+    let dead = [];
+    if (dealer) {
+      contenders = st.players.filter((p) => p.inHand && !p.folded && p.hole.every((c) => c !== null));
+      dead = (st.burned || []).slice();
+      for (const p of st.players) {
+        // ⚠️ 只算「这一手发了牌」的人。已被淘汰(!inHand)的人手里留的是**上一手的旧牌**,
+        //    牌堆每手都重洗,把旧牌当死牌排除会把这一手真正在用的牌剔掉。
+        if (!p.inHand) continue;
+        const [c1, c2] = p.hole || [];
+        const isContender = !p.folded && c1 !== null && c1 !== undefined && c2 !== null && c2 !== undefined;
+        if (isContender) continue;
+        // 弃牌者的牌荷官看得到,而且它们物理上**不可能**再出现在公共牌上。
+        // 不排除就等于把两张已经发出去的牌又放回牌堆 —— 那会算得比常规胜率还差,
+        // 而需求要的正是「比常规胜率更准」。
+        if (c1 !== null && c1 !== undefined) dead.push(c1);
+        if (c2 !== null && c2 !== undefined) dead.push(c2);
+      }
+    }
+
+    // 只剩一个人(别人都弃了)时没有「胜率」可言,直接不显示
+    const sig = contenders.length >= 2 ? this.equitySignature(st, contenders, dead) : '';
+    if (sig === this._eqSig) return;      // ← 性能的关键:状态没变就一次都不重算
+    this._eqSig = sig;
+    this._eqRun = null;                   // 上一轮作废(它算的是旧状态)
+    this.equity = null;
+    if (!sig) return;
+
+    try {
+      this._eqRun = createEquityRun({
+        contenders: contenders.map((p) => ({ seat: p.seat, hole: p.hole.slice() })),
+        board: st.board.slice(),
+        dead,
+        shortDeck: !!st.shortDeck,
+        samples: Math.max(EQUITY_MIN_SAMPLES,
+          Math.min(DEFAULT_SAMPLES, Math.round(EQUITY_EVAL_BUDGET / contenders.length))),
+      });
+    } catch (err) {
+      // 上游数据有问题(比如同一张牌出现两次)时**只记不改流程**:
+      // 胜率是附加信息,绝不能因为它让牌局卡住。
+      this._eqRun = null;
+      (this.debugErrors ||= []).push('胜率计算失败: ' + (err?.message || err));
+      return;
+    }
+    this.pumpEquity();
+  }
+
+  /**
+   * 状态签名:只有它变了才重算。
+   * 只把「真正影响胜率的东西」拼进去 —— 手数、模式、公共牌、每个参与者与死牌
+   * (烧牌 + 弃牌者的牌)。底池、谁在思考、谁下了多少注都不影响
+   * 「此刻全部摊牌谁赢」,所以不进签名 —— 下注/跟注因此一次都不会触发重算。
+   */
+  equitySignature(st, contenders, dead = []) {
+    const parts = [st.handNo, st.shortDeck ? 'S' : 'N', st.board.join('.'), dead.join('.')];
+    for (const p of contenders) parts.push(`${p.seat}:${p.hole.join('.')}`);
+    return parts.join('|');
+  }
+
+  /**
+   * 按时间片推进模拟。
+   *
+   * 为什么不用「算完再画」的一次性算法:一次 9 人桌翻牌前的模拟要几百毫秒,
+   * 主线程被占着 → 牌桌上的动画、按钮、思考气泡全卡住。
+   * 这里每次只给它几毫秒(空闲回调里有多少空闲时间就给多少),算完再重画一次。
+   *
+   * 期间状态一变(下一张牌、有人弃牌、退回主页),这一轮就直接扔掉:
+   * 用 _eqRun 的身份 + generation 双重判定(和 AI 循环那套一致)。
+   */
+  pumpEquity() {
+    const run = this._eqRun;
+    if (!run) return;
+    const gen = this.generation;
+    const idle = typeof globalThis.requestIdleCallback === 'function';
+    const pump = (deadline) => {
+      if (this._eqRun !== run || gen !== this.generation || !this.engine) return;
+      const left = deadline && typeof deadline.timeRemaining === 'function' ? deadline.timeRemaining() : 6;
+      const done = run.step(Math.max(2, Math.min(12, left)));
+      if (this._eqRun !== run) return;
+      if (!done) {
+        // timeout 兜底:页面一直很忙(idle 不触发)时也保证能往前推
+        if (idle) globalThis.requestIdleCallback(pump, { timeout: 250 });
+        else setTimeout(pump, 16);
+        return;
+      }
+      this._eqRun = null;
+      const res = run.result();
+      const pct = new Map();
+      res.seats.forEach((seat, i) => pct.set(seat, res.shares[i]));
+      this.equity = { pct, exact: res.exact, samples: res.samples, ties: res.ties };
+      // 签名没变,这次 render 不会再触发一轮计算
+      this.render();
+    };
+    if (idle) globalThis.requestIdleCallback(pump, { timeout: 250 });
+    else setTimeout(() => pump(), 0);
   }
 
   render(extra = {}) {

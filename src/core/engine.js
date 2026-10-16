@@ -7,7 +7,8 @@
  *
  * 已实现的规则要点:
  *  - 2~9 人,按钮位每手轮转;单挑时按钮位下小盲、翻前先行动、翻后后行动。
- *  - 盲注可升盲(everyNHands 手翻倍)。
+ *  - 盲注两种升法(可单开、可叠加):每 N 手翻倍(blindUpEvery)、
+ *    每 N 手按档位表升一档(blindLevelUp + blindLevelHands,默认 20)。
  *  - 52 张标准 / 36 张短牌(短牌 A6789 为最小顺子,同花 < 葫芦)。
  *  - 无限注下注:最小加注额、短码全下不重开下注轮、未被跟的下注退回。
  *  - 多人全下自动切边池,平局按顺时针分池,余数给最近按钮左侧赢家。
@@ -20,9 +21,9 @@ const STREETS = ['preflop', 'flop', 'turn', 'river'];
 const STREET_LABEL = { preflop: '翻牌前', flop: '翻牌', turn: '转牌', river: '河牌', showdown: '摊牌' };
 
 /**
- * 升盲表:每过 10 个完整「人回合」(按钮位转满 10 圈)上升一档。
- * 数值按需求给的表原样使用,从 100/200 一路到 50,000/100,000。
- * 起始盲注如果不在表里,会自动匹配最接近的一档,再从那一档往上走。
+ * 升盲表:21 档,从 100/200 一路到 50,000/100,000。
+ * **每档打多少手**由 blindLevelHands 决定(默认 20 手),这张表只提供「档与档之间的倍率」。
+ * 数值按需求给的表原样使用。起始盲注如果不在表里,会自动匹配最接近的一档,再从那一档往上走。
  */
 export const BLIND_LEVELS = [
   [100, 200], [200, 400], [300, 600], [400, 800], [500, 1000],
@@ -32,8 +33,40 @@ export const BLIND_LEVELS = [
   [50000, 100000],
 ];
 
-/** 每多少个人回合升一档 */
-export const BLIND_LEVEL_ORBITS = 10;
+/**
+ * 「每多少**手**按档位表升一档」的**默认值** = 20。
+ *
+ * ── 单位为什么是「手」而不是「个人回合(orbit)」────────────────────────
+ * 这个间隔原来按「个人回合」算(1 个 orbit = 按钮位转一圈 = 人数手)。
+ * 用户实测后指出单位不对:他设 3,截图上却是「第 6 手 · 本档 0/3 回合」——
+ * 9 人桌一个 orbit 要 9 手,他以为「一回合 = 一手」。
+ * 现在按**手**算:与人数无关,9 人桌设 3 就是每 3 手升一档(第 4 手开始用新盲注)。
+ *
+ * ── 20 这个默认值是怎么来的 ──────────────────────────────────────────
+ * 旧的默认是 10 个 orbit,换算成手数会跟人数走:6 人桌 60 手、9 人桌 90 手、3 人桌 30 手。
+ * 单位换成手之后,继续用 10 就等于「6 人桌每 10 手升一档」——比原来快 6 倍,不能照搬。
+ * 手数无法同时等于三个不同的旧值,所以取一个**与人数无关的整数档**:
+ *   · 20 手 = 6 人桌约 3.3 圈 / 9 人桌约 2.2 圈 / 3 人桌约 6.7 圈;
+ *   · 表里 21 档之间有 20 次升档,20 手 × 20 次 = 400 手到顶档
+ *     (实测:第 401 手开始是 50,000/100,000)—— 默认 100 个大盲的深筹码,
+ *     一局打完够用;而 10 手会让整张表 200 手就跑完 —— 盲注涨得比牌还快,变成掷硬币;
+ *   · 现场锦标赛的习惯是「每 2 圈左右升一次盲」,20 手正好落在 2~3 圈这个区间。
+ * 所以选 20(而不是 60/90 那种「精确等于某个人数的旧值」):手数本来就与人数无关,
+ * 硬凑一个能对上 6 人桌的 60 反而让 9 人桌的节奏慢得没道理,数字也不直观。
+ *
+ * 这个值现在只是默认值:真正的值走 settings.blindLevelHands → state.blindLevelHands,
+ * 设置面板里能改、牌局进行中也能改(见 setBlindLevelHands)。
+ * 常量仍保留,是因为「默认手感」要靠它钉住 —— 不传这个字段时行为必须逐手可预测。
+ */
+export const BLIND_LEVEL_HANDS = 20;
+/** 同时对外导出个语义化名字,免得别处再写一个魔法数 20 */
+export const BLIND_LEVEL_HANDS_DEFAULT = BLIND_LEVEL_HANDS;
+/**
+ * 手数的上限。
+ * 9999 手(9 人桌约 1100 圈)在实际牌局里已经等价于「这一局几乎不升档」,
+ * 但不能允许 Infinity / 1e308 这种值 —— 它会原样写进 JSON 配置,下次读回来还是坏的。
+ */
+export const BLIND_LEVEL_HANDS_MAX = 9999;
 
 /** 从起始大盲找到最接近的一档下标 */
 function nearestLevelIndex(bigBlind) {
@@ -67,6 +100,54 @@ function nextBlindLevel(smallBlind, bigBlind, level) {
 
 export function BLIND_LEVELS_PREVIEW() { return BLIND_LEVELS.map(([sb, bb]) => `${sb}/${bb}`); }
 
+/**
+ * 把界面上来的「每 N 手升盲」夹成合法值。
+ *
+ * 必须夹:这个值来自 <input type="number">,空串 / "abc" → NaN,负数 / 小数
+ * 也不是合法节奏。不夹的话 NaN 会让 `(handNo - anchor) % NaN === 0` 永远为假
+ * (静默不升盲)、负数同理,用户只会看到「设了没反应」。
+ * 上限 9999:再大就等于「永不升盲」,但不该允许 Infinity 这种把 JSON 配置写坏的值。
+ */
+function clampBlindUpEvery(n) {
+  const v = Math.floor(Number(n));
+  if (!Number.isFinite(v) || v < 0) return 0;
+  return Math.min(9999, v);
+}
+
+/**
+ * 把任意来源的值变成「整数」;空白 / null / 非数字 → NaN。
+ *
+ * 为什么要单独一个:Number('') === 0、Number(null) === 0、Number(undefined) === NaN ——
+ * 光判 Number.isFinite 会把**空白**当成用户明确填的 0,而这两个意思完全不同
+ * (空白 = 没填,0 = 我要关掉档位升盲)。这一层把它们区分开,后面才谈得上夹取。
+ */
+function toInt(value) {
+  if (value === null || value === undefined || value === '') return NaN;
+  const v = Math.floor(Number(value));
+  return Number.isFinite(v) ? v : NaN;
+}
+
+/**
+ * 把界面上来的「每 N 手升一档」夹成合法值。
+ *
+ * ⚠️ 空白 / 非数字 / 负数回落到**默认的 20**,而不是 0。
+ *    0 本身是个合法值(「永不按档位升盲」),所以空白不能理解成 0 ——
+ *    否则用户把设置里那一格清空再保存,会以为「没填就是不改」,实际却把档位升盲关掉了。
+ *    这一条与『每 N 手翻倍』那边的 clampBlindUpEvery(非法值 → 0)故意不同:
+ *    那个字段的 0 就是「不升盲」的默认状态,这个字段的默认状态是「每 20 手升一档」。
+ * 夹取的理由和 blindUpEvery 一样:值来自 <input type="number">,空串 / "abc" → NaN、
+ *    负数 / 小数都不是合法节奏。不夹的话,升档判定会永远为假(负数 / NaN),
+ *    用户只会看到「设了没反应」。
+ * ★ 0 是**合法且有意义**的:0 = 永不按档位升盲(与 blindUpEvery 的 0 = 不升盲同一套直觉)。
+ *    判定处写的是 `every > 0 && ...`,所以 0 只会让档位升盲彻底停住,
+ *    **不会**变成「疯狂升档」——那种事故恰恰是不夹取 NaN/负数才会有的。
+ */
+function clampBlindLevelHands(n) {
+  const v = toInt(n);
+  if (!Number.isFinite(v) || v < 0) return BLIND_LEVEL_HANDS_DEFAULT;
+  return Math.min(BLIND_LEVEL_HANDS_MAX, v);
+}
+
 const DEFAULT_SETTINGS = {
   seats: 6,
   shortDeck: false,
@@ -75,8 +156,12 @@ const DEFAULT_SETTINGS = {
   bigBlind: 20,
   ante: 0,
   bigBlindAnte: false,  // 大盲前注:大盲位额外拿出「一个当前大盲」当前注
-  blindLevelUp: false,  // 每 10 个人回合按 BLIND_LEVELS 升一档
-  blindUpEvery: 0,      // 老模式:每 N 手盲注翻倍(0 = 关闭)
+  blindLevelUp: false,  // 每 N 手按 BLIND_LEVELS 升一档(N 见 blindLevelHands)
+  // ★ 每多少**手**升一档。0 = 永不按档位升盲(与 blindUpEvery 的 0 = 不升盲同一套直觉)。
+  //   默认 20 —— 为什么不是沿用旧的 10 个 orbit 见上面 BLIND_LEVEL_HANDS 的注释。
+  //   按手计数与人数无关:9 人桌设 3 就是每 3 手一档(用户实测反馈的就是这一点)。
+  blindLevelHands: BLIND_LEVEL_HANDS_DEFAULT,
+  blindUpEvery: 0,      // 每 N 手盲注翻倍(0 = 不升盲;与 blindLevelUp 互不影响,可叠加)
   humanSeat: null,      // 玩家模式:人类坐哪个座位(荷官模式为 null)
   // 发牌一律用 crypto 随机(见 cards.js 的 cryptoRandom),不做种子复现。
   // 需要可复现的测试请在构造时传 opts.rand(例如 mulberry32),别指望 settings.seed。
@@ -129,6 +214,25 @@ class PokerEngine {
       bigBlindAnte: !!s.bigBlindAnte,
       blindLevelUp: !!s.blindLevelUp,
       blindLevel: s.blindLevelUp ? nearestLevelIndex(s.bigBlind) : -1,
+      // 「每 N 手升一档」的节奏也放一份在 state 里,理由与下面的 blindUpEvery 相同:
+      // 它牌局进行中就能改(见 setBlindLevelHands),只读 settings 的话中途改完要重开一局才生效。
+      blindLevelHands: clampBlindLevelHands(s.blindLevelHands),
+      // 上一次升档(或中途改节奏)发生在**第几手**。升档判定用
+      // 「距 anchor 够不够 N 手」,不用绝对手数取模 —— 中途改节奏时把 anchor
+      // 挪到当前手数,新节奏就从那一刻起算(不会出现「刚调长,下一手就升档」)。
+      // ⚠️ 这个字段的单位跟着这次改动从「人回合数」变成了「手数」:旧值只在内存里活一手,
+      //    没有落盘,所以不存在「读回旧语义的 anchor」这种问题(配置里也没有它)。
+      blindLevelAnchor: 0,
+      // 「每 N 手翻倍」的节奏也放一份在 state 里 —— 它是**牌局进行中可改**的
+      // (见 setBlindUpEvery):只读 settings 的话,中途改完必须重开一局才生效。
+      blindUpEvery: clampBlindUpEvery(s.blindUpEvery),
+      // 上一次翻倍(或中途改节奏)发生在第几手。翻倍判定用「距 anchor 够不够 N 手」,
+      // 不用绝对手数取模 —— 中途改节奏时把 anchor 挪到当前手,新节奏就从那一刻起算。
+      blindUpAnchor: 0,
+      // 已经翻过几次倍(第几档 = 这个数 + 1)。★ 档位**必须**由实际翻倍次数算出来,
+      // 不能拿手数去除以 N:中途改过节奏或者关过又开的时候,两者会对不上,
+      // 顶栏就会出现「第 2 档」但盲注还是起始值这种自相矛盾的显示。
+      blindUpCount: 0,
       orbits: 0,               // 已经打过的完整「人回合」数(按钮位转一圈算一个)
       blindLevelSince: 0,      // 当前这一档是从第几手开始生效的
       // 最小加注规则的两个基准(见 startHand / act 里的说明):
@@ -383,6 +487,13 @@ class PokerEngine {
    * 中间插入一次 viewForDealer 就可能漏掉一圈。改成**按需推进**:任何一次读取
    * (界面渲染、AI 决策、测试断言)都会顺手把圈数补上,幂等且不会漏。
    * 判定方式:这一手的按钮位序号不比上一手大(说明绕回去了),就进入新的一圈。
+   *
+   * ⚠️ 这个函数**只管数圈**,不再负责升档。
+   *    升档原来挂在这里(「每 N 个完整人回合升一档」,靠任何一次读取顺手触发),
+   *    现在档位升盲按**手**算,判定搬到了 startHand() 里(见那里的注释)——
+   *    因为「第 N 手打完、第 N+1 手开始前升档」这个时机,只有 startHand 知道。
+   *    留在这里会让两条不同单位的节奏绞在一起,还会出现「读一下视图就顺手升了档」
+   *    这种看不出触发点的副作用。orbits 计数本身保留(它是最直观的进度指标)。
    */
   orbitsNow() {
     const st = this.state;
@@ -402,36 +513,162 @@ class PokerEngine {
 
     // 按钮位绕回去了 → 完成一个完整人回合
     st._lastButton = st.button;
-    const next = (st.orbits || 0) + 1;
-    st.orbits = next;
-
-    // 每满 10 圈升一档
-    if (next % BLIND_LEVEL_ORBITS === 0 && st._leveledAtOrbit !== next) {
-      st._leveledAtOrbit = next;
-      const lv = st.blindLevel + 1;
-      const nxt = lv < BLIND_LEVELS.length
-        ? nextBlindLevel(st.smallBlind, st.bigBlind, st.blindLevel)
-        : null;
-      if (nxt) {
-        st.blindLevel = lv;
-        st.smallBlind = nxt[0];
-        st.bigBlind = nxt[1];
-        this._log(`盲注升级(第 ${next} 个人回合,第 ${lv + 1} 档)→ ${nxt[0]}/${nxt[1]}`, 'level');
-      }
-    }
+    st.orbits = (st.orbits || 0) + 1;
     return st.orbits || 0;
+  }
+
+  /**
+   * 「每 N 手按档位表升一档」现在的进度:本档打的是第几手、每档多少手。
+   * 没开这个模式(blindLevelUp 关着 / blindLevelHands = 0)或还没开局时返回 null ——
+   * 界面据此决定顶栏要不要显示档位,不用自己再判一遍(与 blindUpInfo 同一个约定)。
+   */
+  blindLevelInfo() {
+    const st = this.state;
+    const every = st.blindLevelHands | 0;
+    if (!st.blindLevelUp || every <= 0 || st.handNo <= 0) return null;
+    return {
+      every,
+      // 本档第几手 = 当前手数 - 上一次升档(或改节奏)的那一手。
+      // 起始档的 anchor 是 0,所以第 1 手算出 1、第 N 手算出 N ——
+      // 与 blindUpInfo 的 handsInTier 完全同一套口径(第 N 手**打完**才升档,
+      // 所以顶栏看到 N/N 就是「这一手打完涨盲」,两处显示不会各说各话)。
+      // 夹一道上限:中途把 N 调小时宁可显示 N/N,也不要「本档 12/5 手」这种自相矛盾的数字。
+      handsInLevel: Math.min(every, Math.max(0, st.handNo - (st.blindLevelAnchor | 0))),
+    };
+  }
+
+  /**
+   * 「每 N 手翻倍」现在的进度:第几档、本档打的是第几手。
+   * 没开这个模式(blindUpEvery = 0)或还没开局时返回 null ——
+   * 界面据此决定顶栏要不要显示档位,不用自己再判一遍。
+   */
+  blindUpInfo() {
+    const st = this.state;
+    const every = st.blindUpEvery | 0;
+    if (every <= 0 || st.handNo <= 0) return null;
+    return {
+      every,
+      tier: (st.blindUpCount | 0) + 1,
+      // 本档第几手 = 当前手数 - 上一档结束(或改节奏)的那一手。起始档的 anchor 是 0,
+      // 所以第 1 手算出 1、第 N 手算出 N,和「第 N 手打完才翻倍」的节奏一致。
+      handsInTier: st.handNo - (st.blindUpAnchor | 0),
+    };
+  }
+
+  /**
+   * 牌局进行中调整「每 N 手升一次盲」的节奏(0 = 不升盲)。返回夹取后的值。
+   *
+   * 为什么允许就地改、而不是要求重开一局:
+   *   这个参数**只影响「下一手开始时要不要翻倍」**,不参与任何一注的计算,
+   *   所以现在改它不会破坏正在进行的下注轮(不会出现「已经跟过注的人忽然欠钱」)。
+   *   而重开一局会把筹码按新规则重发 —— 对「我就想把升盲调慢点」这种诉求代价太大。
+   * ★ 必须同时更新 settings 与 state:
+   *   settings 是「下次重新构造引擎时的值」,state 是「这一局现在用的值」。
+   *   只改一边的话,不是中途改完不生效,就是下一局又变回去。
+   * ★ 改了节奏要把 anchor 挪到当前手(重新起算):
+   *   不挪的话新节奏会接着旧的「绝对手数」往下对齐 —— 实测改成每 3 手升一次时
+   *   会出现「下一手立刻翻倍」(因为当前手数正好是 3 的倍数),用户看到的是
+   *   「我刚调慢,盲注马上就涨了」。挪了之后是「从现在起再打 N 手才涨」。
+   */
+  setBlindUpEvery(n) {
+    const every = clampBlindUpEvery(n);
+    const st = this.state;
+    const changed = every !== (st.blindUpEvery | 0);
+    this.settings.blindUpEvery = every;
+    st.blindUpEvery = every;
+    if (changed && every > 0) st.blindUpAnchor = Math.max(0, st.handNo | 0);
+    this._log(every > 0 ? `升盲节奏改为:每 ${every} 手翻倍` : '已关闭「每 N 手升盲」', 'level');
+    return every;
+  }
+
+  /**
+   * 牌局进行中调整「每 N 手按档位表升一档」的节奏(0 = 永不按档位升盲)。返回夹取后的值。
+   *
+   * 为什么允许就地改、而不是要求重开一局 —— 和 setBlindUpEvery 同一个理由:
+   *   这个参数只决定「这一手打完要不要升档」,不参与任何一注的计算,
+   *   现在改它不会破坏正在进行的下注轮(不会出现「已经跟过注的人忽然欠钱」)。
+   *   而重开一局会把筹码按新规则重发,对「我就想把升盲调慢点」代价太大。
+   * ★ 必须同时更新 settings 与 state:
+   *   settings 是「下次重新构造引擎时的值」,state 是「这一局现在用的值」。
+   *   只改一边的话,不是中途改完不生效,就是下一局又变回去。
+   * ★ 改了周期要把 anchor 挪到**当前手数**(重新起算),这是本次改动最容易踩的坑:
+   *   不挪的话新周期会接着旧的绝对手数往下对齐。实测(与 blindUpEvery 同一个坑):
+   *   已经打了 18 手、周期从 20 调成 3 时,当前手数正好是 3 的倍数,
+   *   于是「我刚把周期调短/调长,下一手就升档了」。挪了之后是「从现在起再打 N 手才升」。
+   * ★ 顶栏的「本档 i/N 手」也要跟着立刻变 —— viewForDealer() 里的 blindLevelHands
+   *   读的就是 state,所以这里改完不用重开一局,渲染出来就是新值。
+   */
+  setBlindLevelHands(n) {
+    const every = clampBlindLevelHands(n);
+    const st = this.state;
+    const changed = every !== (st.blindLevelHands | 0);
+    this.settings.blindLevelHands = every;
+    st.blindLevelHands = every;
+    // 无论调大、调小还是关掉(0),都把 anchor 挪到当前手数:
+    // 调小时不许「立刻升一档」(历史进度不算数),关掉再打开时也不许被旧进度凑满。
+    if (changed) st.blindLevelAnchor = Math.max(0, st.handNo | 0);
+    this._log(every > 0
+      ? `档位升盲节奏改为:每 ${every} 手升一档`
+      : '已关闭「按档位升盲」', 'level');
+    return every;
   }
 
   startHand() {
     const st = this.state;
     if (st.handNo > 0 && !st.handOver) throw new Error('上一手还没结束');
 
-    // 老的升盲模式:每 N 手盲注翻倍
-    const upEvery = this.settings.blindUpEvery | 0;
-    if (upEvery > 0 && st.handNo > 0 && st.handNo % upEvery === 0) {
+    // 「每 N 手盲注翻倍」(设置里的「升盲节奏」)。
+    //
+    // ⚠️ 读的是 state.blindUpEvery,不是 settings.blindUpEvery:
+    //    这个参数牌局进行中就能改(setBlindUpEvery 会同时更新两处),
+    //    只读 settings 的话中途改完要重开一局才生效。
+    // 时机:距上一次翻倍(anchor)满 N 手就翻,翻在**这一手开始之前** ——
+    //    也就是说第 N 手本身仍按旧盲注打,第 N+1 手才看到新盲注。
+    //    `handNo > anchor` 这一条同时承担了「第一手不翻」和「改完节奏不立刻翻」。
+    const upEvery = st.blindUpEvery | 0;
+    const upAnchor = st.blindUpAnchor | 0;
+    if (upEvery > 0 && st.handNo > upAnchor && (st.handNo - upAnchor) % upEvery === 0) {
       st.smallBlind *= 2;
       st.bigBlind *= 2;
-      this._log(`盲注升级 → ${st.smallBlind}/${st.bigBlind}`, 'level');
+      st.blindUpCount = (st.blindUpCount | 0) + 1;
+      st.blindUpAnchor = st.handNo;
+      this._log(`盲注升级(每 ${upEvery} 手翻倍,第 ${st.blindUpCount + 1} 档)→ ${st.smallBlind}/${st.bigBlind}`, 'level');
+    }
+
+    // 「每 N 手按档位表升一档」(设置里的「升盲模式」+ 升盲周期)。
+    //
+    // ⚠️ 读的是 state.blindLevelHands,不是 settings.blindLevelHands:
+    //    这个值牌局进行中就能改(setBlindLevelHands 会同时更新两处),
+    //    只读 settings 的话中途改完要重开一局才生效。
+    // 时机与上面「每 N 手翻倍」**逐字对齐**(用户要求两处的边界语义一致):
+    //    距上一次升档(anchor)满 N 手就升,升在**这一手开始之前** ——
+    //    第 N 手本身仍按旧盲注打,第 N+1 手才看到新盲注。
+    //    `st.handNo > anchor` 这一条同时承担「第 1 手不升」和「刚改完节奏不立刻升」。
+    //    例:9 人桌设 3,第 1/2/3 手都不动,第 4 手开始时升一档(第 3 手打完了)。
+    // ★ 按**手**计数,与人数无关 —— 这是本次改动的全部要点。
+    //    以前按「个人回合」算,9 人桌的 1 个回合是 9 手,用户设 3 就变成了每 27 手升一档,
+    //    他看到的顶栏是「第 6 手 · 本档 0/3 回合」,以为设了没生效。
+    // ★ 这里**不能**写成「绝对手数 % N === 0」:中途改节奏时 anchor 会挪到当前手数,
+    //    取模写法会接着旧的绝对手数往下对齐,出现「刚把周期调长,下一手反而立刻升档」。
+    //    (这个坑在 blindUpEvery 上踩过一次,两处保持一致。)
+    if (st.blindLevelUp) {
+      const lvEvery = st.blindLevelHands | 0;
+      const lvAnchor = st.blindLevelAnchor | 0;
+      if (lvEvery > 0 && st.handNo > lvAnchor && (st.handNo - lvAnchor) % lvEvery === 0) {
+        const lv = st.blindLevel + 1;
+        const nxt = lv < BLIND_LEVELS.length
+          ? nextBlindLevel(st.smallBlind, st.bigBlind, st.blindLevel)
+          : null;
+        if (nxt) {
+          st.blindLevel = lv;
+          st.smallBlind = nxt[0];
+          st.bigBlind = nxt[1];
+          // 升档后把 anchor 挪到**本次升档前已经打完的手数**(也就是 st.handNo):
+          // 如此 anchor 与后续手数始终相差整数个 N,等价于「每 N 手一次」。
+          st.blindLevelAnchor = st.handNo;
+          this._log(`盲注升级(第 ${st.handNo} 手打完,第 ${lv + 1} 档)→ ${nxt[0]}/${nxt[1]}`, 'level');
+        }
+      }
     }
 
     st.handNo += 1;
@@ -468,7 +705,8 @@ class PokerEngine {
     // 按钮位轮转
     st.button = this._nextSeat(st.button + 1, (p) => p.inHand);
 
-    // 人回合与升盲:按需推进(见 orbitsNow)
+    // 人回合计数:按需推进(见 orbitsNow)。
+    // 只是个进度指标 —— 档位升盲的判定已经在上面按**手**做完了。
     this.orbitsNow();
 
     // 洗牌(纯随机)
@@ -1129,13 +1367,28 @@ class PokerEngine {
   viewForDealer() {
     const st = this.state;
     const human = st.humanSeat;
+    // 「每 N 手翻倍」的进度(顶栏显示用;没开就是 null)
+    const up = this.blindUpInfo();
+    // 「每 N 手按档位表升一档」的进度(同样给顶栏用;没开就是 null)
+    const lv = this.blindLevelInfo();
     return {
       handNo: st.handNo, street: st.street, streetLabel: STREET_LABEL[st.street] || st.street,
       button: st.button, smallBlind: st.smallBlind, bigBlind: st.bigBlind, ante: st.ante,
       bigBlindAnte: !!st.bigBlindAnte, bbAnte: st.bbAnte || 0,
       blindLevelUp: !!st.blindLevelUp, blindLevel: st.blindLevel,
       blindLevelCount: BLIND_LEVELS.length, orbits: this.orbitsNow(),
-      orbitsPerLevel: BLIND_LEVEL_ORBITS,
+      // ★ 顶栏「第 k/21 档(本档 i/N 手)」里的两个数 **必须**是这里出来的值:
+      //   单位是**手**(与设置面板里的 blindLevelHands 同一个单位),N 不能再用写死的常量 ——
+      //   否则设置里改成 5,顶栏还显示 /20。读 state(而不是 settings/常量)
+      //   是为了让牌局进行中改完立刻反映到界面上。
+      //   blindLevelHands 恒为配置里的周期(没开升盲模式时也照给,方便排查"到底配了多少");
+      //   blindLevelHandsInLevel 是本档第几手,没开升盲模式时是 0(界面据此不显示那一段)。
+      blindLevelHands: st.blindLevelHands | 0,
+      blindLevelHandsInLevel: lv ? lv.handsInLevel : 0,
+      // 「每 N 手翻倍」的节奏与档位(0 = 没开这个模式)
+      blindUpEvery: up ? up.every : 0,
+      blindUpTier: up ? up.tier : 0,
+      blindUpHandsInTier: up ? up.handsInTier : 0,
       shortDeck: st.shortDeck, board: st.board.slice(), pot: this.totalPot(), currentBet: st.currentBet,
       burned: (st.burned || []).length,
       minRaiseTo: st.minRaiseTo, lastFullRaise: st.lastFullRaise,
@@ -1226,6 +1479,12 @@ class PokerEngine {
       blindUnit: st.bigBlind,
       ante: st.ante, bbAnte: st.bbAnte || 0, bigBlindAnte: !!st.bigBlindAnte,
       blindLevelUp: !!st.blindLevelUp, blindLevel: st.blindLevel, orbits: st.orbits || 0,
+      // 升档进度也带上(与顶栏同一份计算,免得两处各写一个数字):
+      // blindLevelHands = 每多少手升一档,blindLevelHandsInLevel = 本档第几手。
+      // 单位是**手** —— 「档位还有多久升」对 AI 判断筹码深度有用,而人数会变,
+      // 说手数才没有歧义。
+      blindLevelHands: st.blindLevelHands | 0,
+      blindLevelHandsInLevel: this.blindLevelInfo()?.handsInLevel || 0,
       // 还有几个人活着 / 总共几个座位 —— 用来判断「离冠军多远」
       aliveCount: sit.aliveCount, totalSeats: sit.totalSeats,
       // 全场筹码排名一览(谁是筹码王、谁快死了)

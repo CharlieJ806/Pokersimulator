@@ -128,6 +128,9 @@ canvas#gl {
   }
   .handstrip__title { font-size: 11px; }
   .handstrip__note { display: none; }          /* 说明性文案,手机上省掉 */
+  /* 摊牌胜率的口径标签**不能**跟着省:它是解释每个人名字旁边那个百分比的。
+     手机上字号收一档、留白收一点,但没有 display:none。 */
+  .handstrip__eqhint { font-size: 9.5px; padding: 0 4px; }
   .handstrip__board {
     padding: 1px 8px;
     min-height: 24px;
@@ -137,6 +140,9 @@ canvas#gl {
   .handstrip__body { padding: 2px 8px 4px; gap: 5px; }
   .handrow { min-width: 58px; padding: 2px 5px; gap: 3px; }
   .handrow__stack { font-size: 10px; }
+  /* 胜率徽标:手机上再压一档。它挤在名字那一行,只影响这一行的**宽度**
+     (手牌一览本来就横向可滚),不影响高度 —— 高度一动就会把牌面挤出可视区。 */
+  .handrow__eq { font-size: 9px; padding: 0 3px; }
   .hscard__pos { font-size: 9px; }
 
   /* 名册要能横向滚动 —— 6 人桌的名牌宽度加起来会超出屏宽,

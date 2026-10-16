@@ -27,6 +27,7 @@
 | **底池摆在桌上哪个位置** | `src/ui3d/table3d.js` | `buildSeats()` 里 `potGroup.position` |
 | **顶栏有哪些按钮 / 叫什么** | `src/ui3d/sceneFull.js` | HTML 模板里的 `<header class="topbar">` |
 | **手牌一览显示什么** | `src/ui3d/sceneFull.js` | `renderHandStrip()` / `renderBoardRow()` |
+| **摊牌胜率**(荷官模式,座位名旁边那个 %) | `src/core/equity.js`(算法)+ `src/ui/app.js`(调度) | `ensureEquity()` / `pumpEquity()`;渲染在 `renderHandStrip()` |
 | **侧栏(牌局记录 / 思考记录)** | `src/ui3d/sceneFull.js` | HTML 模板里的 `<aside class="sidepanel">` |
 | **玩家模式那三个按钮 / 常驻信息条** | `src/ui/playerbar.js` | `createPlayerBar()` 里的 HTML 模板 |
 | **开局设置页**(滑杆、开关、厂商) | `src/ui3d/setup3d.js` | HTML 模板 |
@@ -86,6 +87,7 @@
 | `src/core/engine.js` | 扑克规则引擎(发牌、下注、边池、结算) |
 | `src/core/cards.js` | 牌的数据结构与洗牌 |
 | `src/core/handEval.js` | 牌型评估 |
+| `src/core/equity.js` | 摊牌胜率(蒙特卡洛 + 能穷举就穷举)。**只给荷官看**,不进 AI |
 | `src/ai/agent.js` | AI 代理(提示词、解析模型输出) |
 | `src/ai/personas.js` | 8 个 AI 性格 |
 
@@ -100,6 +102,7 @@
 | `.topbar` / `.topbar__left` / `.topbar__right` | 顶栏 |
 | `.sidepanel` | 右侧栏(牌局记录 / 思考记录) |
 | `.handstrip` / `.handstrip__head` / `.handstrip__body` / `.handrow` | 下方手牌一览 |
+| `.handrow__eq` / `.handstrip__eqhint` | 摊牌胜率徽标(只在荷官模式出现)与它的口径标签 |
 | `.actionbar` | 底部操作条(下一位 / 节奏 / 发牌) |
 | `.pbar` / `.pbar__stats` / `.pbar__prompt` / `.pbar__acts` / `.pbar__raise` | 玩家模式的下注条 |
 | `.pstat--chips` | 「我的筹码」那一项 |

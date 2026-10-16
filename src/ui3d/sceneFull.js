@@ -108,6 +108,13 @@ export class SceneTable {
             <header class="handstrip__head">
               <span class="handstrip__title">手牌一览</span>
               <span class="handstrip__note" id="handStripNote"></span>
+              <!-- 摊牌胜率的口径说明。
+                   ⚠️ 不要复用 .handstrip__note 那一格:它在手机上被 display:none 掉了
+                   (那是「x/y 张」这种可省文案),而「这是假设此刻全部摊牌的胜率」
+                   不能省 —— 否则容易被当成「他现在赢面多大」。
+                   放在标题右侧、不占行高:胜率徽标加在每个人「名字」那一行里,
+                   加高任何一行都会挤掉手机上的牌面。 -->
+              <span class="handstrip__eqhint" id="handStripEq" hidden></span>
               <button class="btn btn--tiny" id="btnHandStrip" title="收起 / 展开">收起</button>
             </header>
             <!-- 公共牌单独来一份:桌面上是 3D 小模型,斜着看看不清牌面 -->
@@ -194,7 +201,7 @@ export class SceneTable {
       log: q('logEl'), thinkLog: q('thinkLogEl'),
       plates: q('platesEl'), bubble: q('bubbleEl'), pot: q('potEl'), potValue: q('potValue'),
       handStrip: q('handStrip'), handStripBody: q('handStripBody'),
-      handStripNote: q('handStripNote'), btnHandStrip: q('btnHandStrip'),
+      handStripNote: q('handStripNote'), handStripEq: q('handStripEq'), btnHandStrip: q('btnHandStrip'),
       boardRow: q('handStripBoard'), boardCards: q('boardCards'),
       boardStreet: q('boardStreet'), boardHint: q('boardHint'), btnReview: q('btnReview'),
       hint: q('hintEl'), toast: q('toastEl'), sidePanel: q('sidePanel'),
@@ -372,6 +379,17 @@ export class SceneTable {
 
     this.renderBoardRow(view);
 
+    // 摊牌胜率:只有荷官模式会给(ctx.equity 为 null 时整块不显示)。
+    // 先找出最高的一份,用来高亮「现在最可能赢的人」。
+    const eqMap = ctx.equity?.pct || null;
+    let eqTop = -1;
+    if (eqMap) {
+      for (const p of view.players) {
+        const v = eqMap.get(p.seat);
+        if (Number.isFinite(v) && v > eqTop) eqTop = v;
+      }
+    }
+
     for (const p of view.players) {
       const persona = personaOf(p.seat);
       const isShowdown = view.handOver && !p.folded && p.inHand && ctx.showdownReveal;
@@ -409,12 +427,26 @@ export class SceneTable {
         ? `<i class="handrow__dot" style="background:${accent}" title="立绘色调"></i>`
         : '';
 
+      // 摊牌胜率徽标:加在**座位名那一行**的最后。
+      // 为什么钉在这一行:手牌一览在手机上有 max-height(web/mobile.css),
+      // 行高一变就会把牌面挤出去(这仓库踩过「底部牌面被裁掉」)。
+      // 名字这行本来就有富余,加个短徽标不会加高任何东西 —— 只会让这一行
+      // 略宽一点,而手牌一览本来就是横向可滚的。
+      // 弃牌 / 淘汰的人拿不到胜率(他们已经不参与了)。
+      const eq = eqMap?.get(p.seat);
+      const eqHtml = Number.isFinite(eq)
+        ? `<span class="handrow__eq${eq === eqTop && eqTop > 0 ? ' is-top' : ''}"`
+          + ' title="摊牌胜率:假设此刻全部亮牌,他赢下这一手的概率(不含后续下注,同分按人数平分)">'
+          + `${Math.round(eq * 100)}%</span>`
+        : '';
+
       parts.push(`
         <div class="handrow handrow--${state}" data-seat="${p.seat}">
           <div class="handrow__who">
             ${dot}
             <span class="plate__name">${esc(persona?.name || p.name || `座位${p.seat + 1}`)}</span>
             ${pos ? `<span class="posbadge ${posCls}">${pos === 'BTN' ? 'D' : pos}</span>` : ''}
+            ${eqHtml}
           </div>
           <div class="handrow__cards">${cardsHtml}</div>
           <div class="handrow__meta">
@@ -437,6 +469,30 @@ export class SceneTable {
         : faceUpCount > 0
           ? `${faceUpCount}/${total} 张`
           : '';
+
+    // 摊牌胜率的标题徽标。只在荷官模式出现 —— 玩家模式 ctx.equity 恒为 null,
+    // 这里连「计算中」都不会显示(玩家绝不能看到别人的胜率)。
+    const eqHint = this.dom.handStripEq;
+    if (eqHint) {
+      const info = ctx.equity;
+      if (info) {
+        eqHint.hidden = false;
+        eqHint.textContent = '摊牌胜率';
+        eqHint.title = '假设此刻全部亮牌,每个人赢下这一手的概率。'
+          + (info.exact
+            ? '(穷举了所有可能的补牌,是精确值)'
+            : `(${info.samples} 次蒙特卡洛采样)`)
+          + '\n不含「能不能打到摊牌」,也不按底池分摊:同牌力的人按人数平分。';
+      } else if (ctx.equityPending && !inPlayerMode) {
+        eqHint.hidden = false;
+        eqHint.textContent = '摊牌胜率 计算中…';
+        eqHint.title = '正在模拟:假设此刻全部亮牌,每个人赢下这一手的概率';
+      } else {
+        eqHint.hidden = true;
+        eqHint.textContent = '';
+        eqHint.removeAttribute('title');
+      }
+    }
   }
 
   /**
@@ -627,18 +683,33 @@ export class SceneTable {
 
   updateTopbar(view, info, streetText) {
     this.dom.handTag.textContent = `第 ${view.handNo} 手`;
-    // 盲注:升盲模式下显示档位与进度(第几档 / 本档已过几个回合)
+    // 盲注:两种升盲各自的进度都显示出来(第几档 / 本档已打多少手)
     let blind = `盲注 ${view.smallBlind} / ${view.bigBlind}`;
     if (view.bbAnte > 0) blind += ` · 大盲前注 ${view.bbAnte}`;
     else if (view.ante > 0) blind += ` · 前注 ${view.ante}`;
-    if (view.blindLevelUp && view.blindLevel >= 0) {
-      const inLevel = view.orbits % view.orbitsPerLevel;
-      blind += ` · 第 ${view.blindLevel + 1}/${view.blindLevelCount} 档(本档 ${inLevel}/${view.orbitsPerLevel} 回合)`;
+    if (view.blindLevelUp && view.blindLevel >= 0 && view.blindLevelHands > 0) {
+      // ★ 单位是**手**(与设置面板里的「每 N 手升一档」同一个单位)。
+      //   这里原来写的是「本档 i/N 回合」—— 那个「回合」指的是个人回合(orbit),
+      //   9 人桌一个回合要 9 手,用户看到「本档 0/3 回合」以为设了没生效。单位必须跟着引擎改。
+      // ★ 周期 N 必须取 view.blindLevelHands(引擎那边的可配置值),绝不能在这里写死 ——
+      //   否则设置里改成 5,顶栏还显示「本档 i/20 手」,看起来就是「设了没生效」。
+      //   本档第几手由引擎算好(blindLevelHandsInLevel,与「每 N 手翻倍」那条路的
+      //   blindUpHandsInTier 同一套口径),这里不再自己取模:手数与 orbits 是两种计数,
+      //   拿 orbits 取模会算出一个「看起来对、其实跟升档时机无关」的数。
+      //   仍然夹一道上限:中途把 N 调小时,界面上宁可显示 N/N,
+      //   也不要出现「本档 12/5 手」这种自相矛盾的数字。
+      const inLevel = Math.min(view.blindLevelHands, Math.max(0, view.blindLevelHandsInLevel | 0));
+      blind += ` · 第 ${view.blindLevel + 1}/${view.blindLevelCount} 档(本档 ${inLevel}/${view.blindLevelHands} 手)`;
     }
+    // 注:「每 N 手盲注翻倍」(blindUpEvery)的用户入口已撤掉,顶栏不再显示它那一档进度。
+    //     引擎里这条能力还在,万一配置里被置成非 0,顶栏也只是不显示,
+    //     不会出现「顶栏说 10/10 手、盲注却翻了倍」这种对不上的显示。
     this.dom.blindTag.textContent = blind;
-    this.dom.blindTag.title = view.blindLevelUp
-      ? '升盲模式:每过 10 个完整人回合升一档'
-      : '盲注固定(可在设置里打开升盲模式)';
+    this.dom.blindTag.title = [
+      view.blindLevelUp
+        ? `升盲模式:每过 ${view.blindLevelHands} 手按档位表升一档(0 = 不按档位升盲;在设置里改)`
+        : '',
+    ].filter(Boolean).join('\n') || '盲注固定(可在设置里打开升盲模式并设置升盲周期)';
     this.dom.deckTag.textContent = view.shortDeck ? '短牌 36 张' : '标准 52 张';
     this.dom.street.textContent = view.handOver ? '本手结束' : (streetText || view.streetLabel || '等待开局');
     this.dom.street.className = 'street street--' + (view.handOver ? 'over' : view.street);

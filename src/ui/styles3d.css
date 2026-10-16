@@ -322,6 +322,16 @@ button { font-family: inherit; }
 }
 .handstrip__title { font-size: 11.5px; font-weight: 700; color: var(--gold); letter-spacing: .1em; }
 .handstrip__note { font-size: 11px; color: var(--text-dim); flex: 1; }
+/* 摊牌胜率的口径标签(只有荷官模式显示)。
+   为什么不复用 .handstrip__note:那一格在手机上被 display:none 掉了,
+   而「这是假设此刻全部摊牌的胜率」是不能省的说明 —— 省掉容易被读成
+   「他现在赢面多大」。这里用一枚小标牌,手机上照样看得见。 */
+.handstrip__eqhint {
+  font-size: 10.5px; font-weight: 700; letter-spacing: .04em;
+  padding: 1px 6px; border-radius: 5px; flex: 0 0 auto;
+  background: var(--gold-soft); color: var(--gold);
+  cursor: help;
+}
 /* ⚠️ 不能用 justify-content:center —— 内容比容器宽时居中会向**两边**溢出,
    左边溢出的那段滚动条够不着(竖屏手机上第一家「你」直接看不到)。
    改成首尾 margin:auto:放得下时照样居中,放不下时退化为从左排起。 */
@@ -397,6 +407,21 @@ body.is-sidepanel-open .handstrip { --strip-right: var(--strip-right-panel, 338p
 .posbadge.pos--btn { background: var(--gold-2); }
 .posbadge.pos--sb { background: var(--blue); }
 .posbadge.pos--bb { background: var(--red); }
+
+/* 摊牌胜率(只有荷官模式会出现,见 ui/app.js 的 ensureEquity)。
+   ⚠️ 尺寸是刻意压小的:它挤在「名字」那一行的末尾,而那一行的宽度决定了
+   整个 handrow 的宽度 —— 手牌一览是横向可滚的,宽一点还能滚,
+   但**高度**绝不能变(mobile.css 里 handstrip__body 有 max-height,
+   行高一变就把牌面挤出去了)。所以这里只改字号/内边距,不设 display:block。 */
+.handrow__eq {
+  font-family: var(--mono); font-size: 9.5px; font-weight: 800;
+  line-height: 1.6; padding: 0 4px; border-radius: 4px;
+  flex: 0 0 auto;
+  background: rgba(176, 137, 72, .18); color: #7a5a1e;
+}
+/* 现在赢面最大的那位:实心黄铜底,一眼看得出「谁领先」 */
+.handrow__eq.is-top { background: var(--gold-2); color: #fff; }
+.handrow--folded .handrow__eq, .handrow--out .handrow__eq { opacity: .6; }
 .handrow__delta { font-family: var(--mono); font-size: 10px; }
 .handrow__delta.is-up { color: var(--green); }
 .handrow__delta.is-down { color: var(--red); }
@@ -501,6 +526,8 @@ body.is-sidepanel-open .handstrip { --strip-right: var(--strip-right-panel, 338p
 .log__line--fold .log__text { color: var(--text-faint); }
 .log__line--bust .log__text { color: var(--red); }
 .log__line--champion .log__text { color: var(--gold); font-weight: 800; }
+/* 升盲:顶栏档位之外,日志里也让它一眼看得出来(📈 + 棕色,与「第 N 手开始」的金色区分开) */
+.log__line--level .log__text { color: #7a5a1e; font-weight: 700; }
 
 .think__item {
   border: 1px solid var(--line);

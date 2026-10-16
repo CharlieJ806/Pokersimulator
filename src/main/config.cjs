@@ -57,6 +57,32 @@ const DEFAULT_CONFIG = {
   // ⚠️ 这个值以前是**死字段**:app.js 的 agentCfg 从来没把它传给 agent,
   //    调用层一直只用它自己的 45s 缺省。现已接通。
   timeoutMs: 45000,
+  /**
+   * 模型调用的重试(临时性失败:超时 / 网络 / 5xx / 无可用渠道 / 过载 / 限流)。
+   *
+   * 为什么要:上游抖动是**一过性**的 —— 报一次「无可用渠道」「overloaded」,
+   * 隔几秒同一条请求就能成。以前一失败就立刻退回本地策略,用户看到的是
+   * 「某个模型偶发超时 → 那一手突然变成本地策略在打」,而它下一手又好了。
+   *
+   * ⚠️ budgetMs 是**一次决策的累计上限**,不是单次调用的超时:
+   *    没有它的话「timeoutMs(45s)× 3 次重试 = 135s」,一张桌子是轮流调模型的,
+   *    一个人卡 135 秒全桌一起等 —— 那比偶尔退回本地策略难忍得多。
+   *    90s = 首次跑满 45s + 一次重试;快速失败(503 通常 1s 内返回)时四次都能试上。
+   *    到点立刻兜底,绝不会让一张桌子停等两分钟。
+   *
+   * ⚠️ 想「任何失败都重试 3 次」(不区分错误类型)就把 classifyErrors 改成 false。
+   *    默认 true 时,401/403、协议不对、模型名错、余额不足直接兜底 ——
+   *    那几种重试必然同样失败,只会白等 5 秒退避再兜底。
+   *
+   * 改这里就够:agent.js 的 resolveRetryPolicy 会把它并到默认策略上
+   * (单个字段缺省/非法都退回内置默认,不会因为一次手误把重试关掉或开成无限)。
+   */
+  llmRetry: {
+    times: 3,                      // 失败后再试几次(一共最多 1 + 3 次请求)
+    backoffMs: [600, 1500, 3000],  // 每次重试前的等待;短退避,不重头等满一个超时
+    budgetMs: 90000,               // 一次决策的累计耗时上限
+    classifyErrors: true,          // false = 不看错误类型,失败就重试
+  },
   game: {
     seats: 6,
     shortDeck: false,
@@ -64,6 +90,24 @@ const DEFAULT_CONFIG = {
     smallBlind: 10,
     bigBlind: 20,
     ante: 0,
+    bigBlindAnte: false,      // 大盲前注(与上面的 ante 二选一,见 app.js 的 buildEngine)
+    blindLevelUp: false,      // 每 N 手按 21 档表升一档(N 见下面的 blindLevelHands)
+    // ★ 升盲周期:每多少**手**按档位表升一档。
+    //   ⚠️ 单位改过一次:上一版按「个人回合(orbit = 按钮位转一圈 = 人数手)」算,
+    //      用户实测指出单位不对(9 人桌设 3 = 每 27 手才升一档,他以为是一手),
+    //      所以现在按手计数,与人数无关。
+    //   默认 20:旧默认 10 个 orbit 换算成手数会跟人数走(6 人桌 60 / 9 人桌 90),
+    //      而手数只有一个人一个数,取一个与人数无关的整数档 —— 20 手 × 20 次升档
+    //      = 400 手到顶档(第 401 手开始是 50,000/100,000),约等于 6 人桌 3.3 圈。
+    //      完整推导见 engine.js 的 BLIND_LEVEL_HANDS。
+    //   由设置面板的 #blindLevelHands 直通 app.js 的 buildEngine → PokerEngine,
+    //   牌局进行中改也立即生效(见 engine.js 的 setBlindLevelHands)。
+    //   0 = 永不按档位升盲。
+    blindLevelHands: 20,
+    // 每 N 手盲注翻倍(0 = 不升盲)。★ 引擎能力保留、但**用户入口已撤掉**
+    //   (用户明确要求「不要翻倍的,只要档位那个」)。所以这个字段不会出现在设置面板里,
+    //   但配置默认 0 = 不升盲,行为与从前完全一致;面板 collect() 对它
+    //   「不读取、也不覆盖」,不会把老配置里的值冲掉。
     blindUpEvery: 0,
   },
   ui: {
@@ -105,10 +149,32 @@ function deepMerge(base, extra) {
 /** 正在进行的 LLM 请求(用于取消) */
 const llmAborts = new Map();
 
+/**
+ * 清掉已废弃的配置键 —— 目前只有一个:game.blindLevelOrbits。
+ *
+ * 它是上一版加的「每 N 个人回合升一档」的周期,单位错了(9 人桌 1 个回合 = 9 手),
+ * 已被 game.blindLevelHands(按手)取代。这里**只删键、不迁移数值**:
+ *   · 旧值是在「回合」这个错单位下填进去的。乘上人数看似"保留原手感",
+ *     实际会造出一个用户从没打算要的数字 —— 他填 3 想的是 3 手,×6 变 18 手,
+ *     对他来说还是「设了没反应」,只是换了个样子;
+ *   · 这个键从没进过任何一次提交(是工作区里未发布的改动),不存在"老配置要靠它"的问题;
+ *   · 留着才是真麻烦:仓库里已经有过「死字段」—— 键在配置里、没人读、排查时
+ *     以为它还在起作用。删掉后 blindLevelHands 走默认值,设置面板里那格会显示
+ *     明确的「每 N 手升一档」,用户看一眼就能重填。
+ */
+function stripLegacyKeys(cfg) {
+  if (!cfg || !cfg.game || cfg.game.blindLevelOrbits === undefined) return cfg;
+  // 复制一层再删:deepMerge 在「补丁里没有 game 这一支」时会直接把 DEFAULT_CONFIG.game
+  // 的引用交出来,原地 delete 会动到默认配置(下次读就少一个键)。
+  const out = { ...cfg, game: { ...cfg.game } };
+  delete out.game.blindLevelOrbits;
+  return out;
+}
+
 function makeStore(configPath) {
   function read() {
     try {
-      return deepMerge(DEFAULT_CONFIG, JSON.parse(fs.readFileSync(configPath, 'utf8')));
+      return stripLegacyKeys(deepMerge(DEFAULT_CONFIG, JSON.parse(fs.readFileSync(configPath, 'utf8'))));
     } catch {
       return JSON.parse(JSON.stringify(DEFAULT_CONFIG));
     }

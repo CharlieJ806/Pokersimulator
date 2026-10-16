@@ -7,6 +7,7 @@
  * 想改什么:
  *   · 设置页有哪些项、排布怎样 → 文件里的 HTML 模板(搜 class="field")
  *   · 「牌手人数」滑杆           → id="seats" + drawPreview()
+ *   · 升盲模式 + 升盲周期        → id="blindLevelUp" / id="blindLevelHands"(0 = 不按档位升盲)
  *   · 节奏模式下拉               → id="flowMode"
  *   · 「一手结束后自动开下一手」 → id="autoNextHand"(默认关,见 app.js 的 autoNextHand)
  *   · 厂商 / 模型 / API Key      → id="provider" / "model" / "apiKey"
@@ -33,7 +34,7 @@ const PERSONA_LIST = [
   ['maniac', '疯子李', '极激进:什么牌都想打'],
 ];
 
-export function createSetup(root, { onStart, onSaveAI, onExitHome, onBack, onModels, mode = 'lobby' } = {}) {
+export function createSetup(root, { onStart, onSaveAI, onExitHome, onBack, onModels, onBlindLevelHands, mode = 'lobby' } = {}) {
   const wrap = el('div', `setup setup--${mode}`);
   wrap.innerHTML = `
     <div class="setup__card">
@@ -83,11 +84,31 @@ export function createSetup(root, { onStart, onSaveAI, onExitHome, onBack, onMod
               <span><b>大盲前注</b>:大盲位额外拿出「一个当前大盲」当前注,其他位置不用出</span>
             </label>
             <label class="switch"><input type="checkbox" id="blindLevelUp"><i></i>
-              <span><b>升盲模式</b>:每过 <b>10 个人回合</b>,盲注按固定档位上升一档(100/200 → … → 50,000/100,000)</span>
+              <span><b>升盲模式</b>:每过多少手牌按固定档位上升一档(100/200 → … → 50,000/100,000)</span>
+            </label>
+            <!-- ★ 升盲周期:以前是引擎里写死的常量,界面上只能看到顶栏那句「本档 0/10 回合」,改不了。
+                  ⚠️ 单位踩过一次坑:这个间隔原来按「个人回合」(orbit = 按钮位转一圈 = 人数手)算,
+                     9 人桌设 3 就变成每 27 手才升一档 —— 用户想的是「一手」,于是反馈「设了没生效」。
+                     现在按**手**算、与人数无关:填 3 就是第 3 手打完、第 4 手开始用新盲注。
+                  放在这个开关**正下方**(同一个 .setup__toggles 分组),而不是另起一块规则:
+                  它和上面的复选框说的是同一件事(「每隔多久升一档」),分开摆会被当成两条独立设置。
+                  沿用 #blindUpEvery 当年那套行内写法(一行 label + 小号说明文字),样式不用加新的。
+                  语义:
+                    · N = 多少**手**升一档(与人数无关;顶栏会显示「本档 i/N 手」);
+                    · 0 = 永不按档位升盲(与旧版「每 N 手翻倍」的 0 同一套直觉);
+                    · 留空 / 负数 / abc / 小数都夹成合法值,超大值夹到 9999(≈ 这一局几乎不升档);
+                    · 默认 20 手:旧的默认是 10 个 orbit,换算成手数会跟人数走(6 人桌 60 手),
+                      手数只有一个数可用,20 是「与人数无关、400 手到顶档」的那个整数档;
+                    · 填了就算没勾上面的开关也不报错,只是等勾上才生效(见 collect())。
+                  ⚠️ 「每 N 手盲注翻倍」(blindUpEvery)的用户入口**已按用户要求撤掉**;
+                     引擎里那条能力仍然保留(配置默认 0 = 不升盲),这里不再暴露它的输入框。 -->
+            <label>
+              <span class="setup__inlineLabel">每</span>
+              <input type="number" id="blindLevelHands" min="0" max="9999" step="1" value="20"
+                     title="每多少手牌上升一档;0 = 永不按档位升盲。牌局进行中改也立即生效(从当前这一手重新起算,不会马上升档)" />
+              <span class="setup__inlineLabel">手升一档(0 = 不按档位升盲)</span>
             </label>
           </div>
-
-          <input type="hidden" id="blindUpEvery" value="0">
         </section>
 
         <section class="setup__col">
@@ -236,7 +257,12 @@ export function createSetup(root, { onStart, onSaveAI, onExitHome, onBack, onMod
     q('smallBlind').value = g.smallBlind ?? 10;
     q('bigBlind').value = g.bigBlind ?? 20;
     q('ante').value = g.ante ?? 0;
-    q('blindUpEvery').value = 0;
+    // 升盲周期。⚠️ 这里以前写死过值(同一个坑我们在 blindUpEvery 上踩过一次:
+    //    界面写死 → 配置项永远被 collect() 覆盖回那个常数 = 死字段)。
+    //    g.blindLevelHands 缺省时给 20 —— 与引擎的默认值 BLIND_LEVEL_HANDS 一致,
+    //    不然老配置文件打开面板会显示成 0(0 = 不按档位升盲),一保存就把用户的档位升盲关掉了。
+    const cfgHands = Math.floor(Number(g.blindLevelHands));
+    q('blindLevelHands').value = Number.isFinite(cfgHands) && cfgHands >= 0 ? cfgHands : 20;
     q('bigBlindAnte').checked = !!g.bigBlindAnte;
     q('blindLevelUp').checked = !!g.blindLevelUp;
     renderProviders();
@@ -268,7 +294,13 @@ export function createSetup(root, { onStart, onSaveAI, onExitHome, onBack, onMod
       const ante = Number(q('ante').value) || 0;
       if (ante > 0) extras.push(`前注 ${ante}`);
     }
-    if (q('blindLevelUp').checked) extras.push('每 10 人回合升盲');
+    // 升盲周期要是也跟着报:两条路径互不依赖,汇总里只写「每 20 手升盲」
+    // 会让人以为刚填的数字没生效(实测这类「设了没反应」的反馈最难查)。
+    // 读的是**输入框当前值**(不是配置),所以还没保存、刚敲进去的数字也会出现在汇总里。
+    // ⚠️ 单位写「手」而不是「人回合」—— 这个字错了会让用户按错误的单位填数(就是本次改动的原因)。
+    const handsRaw = Math.floor(Number(q('blindLevelHands').value));
+    const hands = Number.isFinite(handsRaw) && handsRaw >= 0 ? Math.min(9999, handsRaw) : 20;
+    if (q('blindLevelUp').checked) extras.push(`每 ${hands} 手升一档`);
     // AI 记性状态也报一下 —— 这个开关会明显影响调用次数与打法,得让人看得见
     const memOn = q('rememberPlayers').checked;
     const memEvery = Math.max(0, Number(q('notesEvery').value) || 0);
@@ -297,15 +329,33 @@ export function createSetup(root, { onStart, onSaveAI, onExitHome, onBack, onMod
     const smallBlind = Math.min(int('smallBlind', 1, Math.max(1, Math.floor(bigBlind / 2))), bigBlind);
     const startingStack = Math.max(int('startingStack', 1, 2000), bigBlind * 2);
     const ante = Math.min(int('ante', 0, 0), startingStack);
+    // 升盲周期:0 = 不按档位升盲;负数 / 空白 / 小数都夹成合法值。
+    // ⚠️ 空白 / 非数字回落的是**默认 20**,不是 0 —— 与引擎的 clampBlindLevelHands 同一套语义:
+    //    0 本身是个合法值(「永不按档位升盲」),所以空白不能理解成 0,
+    //    否则用户把这一格清空再保存,会以为「没填就是不改」,实际却把档位升盲整个关掉了。
+    //    ⚠️ 这里必须显式判空串:Number('') === 0,只判 isFinite 会把空白当成合法的 0。
+    //    负数 / abc 同样回落到 20(那两种输入显然不是「我想关掉」的意思)。
+    // 引擎那边还会再夹一次,这里夹是为了**回写到输入框**让人看见自己填的 abc / -5 变成了什么。
+    const handsTxt = String(q('blindLevelHands').value).trim();
+    const handsRaw = Math.floor(Number(handsTxt));
+    const blindLevelHands = (handsTxt !== '' && Number.isFinite(handsRaw) && handsRaw >= 0)
+      ? Math.min(9999, handsRaw)
+      : 20;
     q('bigBlind').value = bigBlind;
     q('smallBlind').value = smallBlind;
     q('startingStack').value = startingStack;
     q('ante').value = ante;
-    return { bigBlind, smallBlind, startingStack, ante };
+    q('blindLevelHands').value = blindLevelHands;
+    return { bigBlind, smallBlind, startingStack, ante, blindLevelHands };
   }
 
   function collect() {
     const nums = sanitizeNumbers();
+    // ⚠️ blindUpEvery(「每 N 手翻倍」)在这个面板里**已经没有入口了**(用户要求只留档位升盲),
+    //    但绝不能像以前那样在这里把它写死 0 —— 那会把用户配置里已有的值冲掉(这个仓库
+    //    反复出现的「死字段 / 写死值」坑)。这里的规矩是:**不读取、但也不覆盖**,
+    //    原样保留 cfg 里那份值(没有就给 0 = 不升盲,引擎的默认值)。
+    const keepBlindUpEvery = Math.max(0, Math.floor(Number(cfg?.game?.blindUpEvery) || 0));
     const game = {
       seats: Number(q('seats').value),
       shortDeck: q('shortDeck').value === 'true',
@@ -315,7 +365,12 @@ export function createSetup(root, { onStart, onSaveAI, onExitHome, onBack, onMod
       ante: nums.ante,
       bigBlindAnte: q('bigBlindAnte').checked,
       blindLevelUp: q('blindLevelUp').checked,
-      blindUpEvery: 0,
+      // ★ 「每 N 手升一档」—— 这条链路必须完整:输入框 → collect().game →
+      //   app.js 的 buildEngine → new PokerEngine({ blindLevelHands }) → 引擎读 state 里的值。
+      //   (引擎支持、界面没有、或者传丢了一环,就是这个仓库最常见的「死字段」。)
+      blindLevelHands: nums.blindLevelHands,
+      // 已撤掉界面入口的旧字段:保留配置里原有的值,不读取、也不覆盖(见上面 keepBlindUpEvery)。
+      blindUpEvery: keepBlindUpEvery,
     };
     const providerId = q('provider').value;
     const ai = { defaultProvider: providerId, model: q('model').value.trim() };
@@ -342,6 +397,19 @@ export function createSetup(root, { onStart, onSaveAI, onExitHome, onBack, onMod
   for (const id of ['bigBlindAnte', 'blindLevelUp', 'autoNextHand', 'rememberPlayers', 'notesEvery']) {
     q(id).addEventListener('change', syncLabels);
   }
+  // 升盲周期:改完就地生效,不用等「应用 / 开始」重开一局。
+  // 这个参数只决定「这一手打完要不要升档」,不参与任何一注的计算,
+  // 所以局中改它是安全的(见 engine.js 的 setBlindLevelHands)。
+  // 同时把夹取后的值写回输入框 —— 填 -5 / 空 / abc 的时候人得看到它变成了什么。
+  q('blindLevelHands').addEventListener('change', () => {
+    const txt = String(q('blindLevelHands').value).trim();
+    const raw = Math.floor(Number(txt));
+    const v = (txt !== '' && Number.isFinite(raw) && raw >= 0) ? Math.min(9999, raw) : 20;
+    q('blindLevelHands').value = v;
+    onBlindLevelHands?.(v);
+    syncLabels();
+  });
+  q('blindLevelHands').addEventListener('input', syncLabels);
   q('flowMode').addEventListener('change', syncLabels);
   // 换厂商时模型名换成新厂商的默认 —— 保留旧的会出现「OpenAI + deepseek-flash」这种对不上的组合
   q('provider').addEventListener('change', () => syncModels(false));
@@ -435,5 +503,24 @@ export function createSetup(root, { onStart, onSaveAI, onExitHome, onBack, onMod
     syncLabels();
   }
 
-  return { show, hide, destroy, fill, collect, setApiNote, setPlayerMode, syncAI, el: wrap };
+  /**
+   * 只同步「升盲周期」这一格。
+   *
+   * 为什么要单独开一个口子:这个设置**牌局进行中在抽屉里改会立刻生效**,
+   * 而主页那个设置页是另一份 DOM、只在启动时 fill 过一次。不同步的话会出现
+   * 「抽屉里显示每 5 手升一档、回主页打开设置却显示 20」,而这时候一点「开始」,
+   * collect() 就把 20 写回配置 —— 刚调好的节奏被悄悄撤掉了。
+   * 不能图省事用整份 fill():那会把用户在设置页改了还没保存的人数、盲注全冲掉
+   * (见 syncAI 上面那段注释,同一个坑)。
+   */
+  function setBlindLevelHands(n) {
+    const txt = String(n ?? '').trim();
+    const raw = Math.floor(Number(txt));
+    const v = (txt !== '' && Number.isFinite(raw) && raw >= 0) ? Math.min(9999, raw) : 20;
+    q('blindLevelHands').value = v;
+    syncLabels();
+    return v;
+  }
+
+  return { show, hide, destroy, fill, collect, setApiNote, setPlayerMode, syncAI, setBlindLevelHands, el: wrap };
 }
