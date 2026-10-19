@@ -119,7 +119,7 @@ fs.writeFileSync(path.join(OUT, 'index.json'), JSON.stringify(manifest, null, 2)
    为什么不直接 fetch index.json:
      · Electron 走 file://,fetch 本地 json 要放开 CSP 且路径写法与网页版不同;
      · 网页版要等一次异步请求,首帧拿不到尺寸 —— 而 table3d 是**同步**
-       用 Box3 量头顶高度来摆思考气泡的(见 table3d.js 的 seatAnchors)。
+       用 Box3 量头顶高度来摆思考气泡的(见 sceneCore/table.js 的 seatAnchors)。
    做成 ESM 之后两边都变成普通 import,同步可用、不需要任何加载状态。 */
 fs.writeFileSync(path.join(OUT, 'manifest.js'),
   '/* 由 tools/fetchportraits.mjs 生成,请勿手改。\n'

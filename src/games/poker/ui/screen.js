@@ -1,0 +1,969 @@
+/**
+ * 3D 场景总装:把 three.js 渲染循环、投影 HUD、日志面板、底部操作条接在一起。
+ *
+ * 对外提供的方法与旧的 2D 版 table.js 保持一致(updateTopbar / updateSeats / updateBoard …),
+ * 这样 app.js 里的引擎与 AI 逻辑完全不用动。
+ *
+ * HUD 是 DOM 叠在 canvas 上的:每个座位的名牌每帧用 camera.project() 投影到屏幕坐标,
+ * 所以文字始终清晰,而牌桌、人物、牌、筹码都是真 3D。
+ *
+ * ────────────────────────────────────────────────────────────
+ * 这个文件里有**所有 HUD 的 DOM 结构**(一个大模板字符串),想加/删界面元素先看这里。
+ * 想改什么:
+ *   · 顶栏有哪些按钮       → 模板里的 <header class="topbar">
+ *   · 侧栏(记录/思考)结构 → 模板里的 <aside class="sidepanel">
+ *   · 手牌一览长什么样     → 模板里的 <section class="handstrip"> + renderHandStrip()
+ *   · 公共牌那一行         → renderBoardRow()
+ *   · 底池标签 / 思考气泡  → 模板里的 .hud 部分 + render() 里的气泡逻辑
+ *   · 摊牌横幅             → showBanner()
+ *   · 下注条的位置         → layoutPlayerBar()(⚠️ 位置是算出来的,不是 CSS 写死的)
+ *   · 动画推进             → _loop() 里的 updateCardAnimations()
+ * ============================================================ */
+
+import * as THREE from '../../../../vendor/three.module.js';
+import { createStage, addLights, addRoom } from '../../../ui3d/sceneCore/stage.js';
+import { Table3D } from '../../../ui3d/sceneCore/table.js';
+import { bubbleHtml, ThinkingBubble } from '../../../ui3d/sceneCore/bubble.js';
+import { PokerProps } from '../../../ui3d/props/poker/tableProps.js';
+import { chipBreakdown, updateCardAnimations, clearCardAnimations } from '../../../ui3d/props/poker/cards3d.js';
+// 数字格式是通用的(平台壳也要用),所以真源在 shared —— 这里转发一份,
+// 让「屏幕模块的调用方」不用记两个路径。
+import { fmt } from '../../../shared/format.mjs';
+
+export { fmt };
+
+function el(tag, className, text) {
+  const n = document.createElement(tag);
+  if (className) n.className = className;
+  if (text !== undefined) n.textContent = text;
+  return n;
+}
+
+/** 名字来自模型名(中转站里可以是任意字符串),拼进 innerHTML 前要转义 */
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+export function chipStackDom(amount, small = false) {
+  const wrap = el('div', 'chips' + (small ? ' chips--sm' : ''));
+  wrap.title = `${amount} 筹码`;
+  chipBreakdown(amount, 5).forEach((tier, i) => {
+    const c = el('div', `chip chip--${tier.cls || 'white'}`);
+    c.style.setProperty('--i', String(i));
+    wrap.appendChild(c);
+  });
+  return wrap;
+}
+
+const LOG_ICON = {
+  hand: '🎴', street: '🃏', fold: '✕', check: '✓', call: '◦', raise: '↑',
+  win: '🏆', pot: '💰', showdown: '👁', level: '📈', bust: '💀', champion: '👑', info: '·',
+};
+
+/**
+ * 建一块牌桌屏幕。游戏的 mount() 用它(`games/poker/index.mjs`)——
+ * 平台壳只拿返回值当「通用界面句柄」(toast / setHint / updateSeats …),
+ * 不认识 SceneTable 这个类。
+ */
+export function createScreen(root, hooks = {}) {
+  return new SceneTable(root, hooks);
+}
+
+export class SceneTable {
+  constructor(root, hooks = {}) {
+    this.hooks = hooks;
+    this.root = root;
+    this.thinkingText = '';
+    this.thinkingSeat = null;
+    this.thinkingLive = false;
+    this.running = true;
+
+    root.innerHTML = `
+      <div class="screen screen--3d">
+        <canvas id="gl"></canvas>
+        <div class="grid-vignette"></div>
+
+        <header class="topbar">
+          <div class="topbar__left">
+            <span class="brand">桌游模拟器</span>
+            <span class="topbar__tag" id="handTag">第 0 手</span>
+            <span class="topbar__tag" id="blindTag">盲注 10 / 20</span>
+            <span class="topbar__tag" id="deckTag">52 张</span>
+          </div>
+          <div class="topbar__center"><span class="street" id="streetTag">等待开局</span></div>
+          <div class="topbar__right">
+            <!-- 文字包在 .btn__label 里:手机上只留图标(mobile.css),
+                 否则按钮横向放不下,右边的「设置」会被挤出屏幕、点不到。
+                 ⚠️ 这里原来还有一个「💭 气泡 开/关」按钮(#btnThink),现在删掉了:
+                 ① 它控制的是「气泡里显不显示思考文字」,而那个行为已经**固定成开**
+                    (见 app.js 里 stepOnce 的 onThink / thinkingText,已经没有那个判断了);
+                 ② 顶栏在手机上本来就横向溢出,少一个按钮就少一份宽度 ——
+                    用户实测「最右边的按钮要靠盲滑才点得到」,减宽是直接解法。
+                 别再把它加回来:气泡没有「关掉」这个需求,而宽度是手机上最紧的资源。 -->
+            <button class="btn btn--ghost" id="btnPeek" title="切换底牌可见度:盖着 → 只看公共牌 → 全部翻开">🂠<span class="btn__label"> 底牌 <b>盖着</b></span></button>
+            <button class="btn btn--ghost" id="btnThinkLog" title="完整的思考记录">🧠<span class="btn__label"> 思考记录</span></button>
+            <button class="btn btn--ghost" id="btnModels" title="给每个 AI 分配不同的模型">🤖<span class="btn__label"> 模型</span></button>
+            <button class="btn btn--ghost" id="btnLog" title="牌局日志">📜<span class="btn__label"> <span id="logBtnLabel">荷官记录</span></span></button>
+            <button class="btn btn--ghost" id="btnSetup" title="牌局设置 / 退出本局">⚙<span class="btn__label"> 设置</span></button>
+          </div>
+        </header>
+
+        <div class="hud" id="hudEl">
+          <!-- 头顶名牌已经去掉了:改用 3D 里的三角指示器(轮到谁谁高亮 + 大小盲标注)。
+               每个人的名字/筹码/名次在看牌区「手牌一览」里,不挡画面。 -->
+          <!-- 思考气泡:DOM 结构与定位都由 sceneCore 的 bubble.js 提供(通用),
+               这里只决定它插在 .hud 里的哪个位置。 -->
+          ${bubbleHtml()}
+          <div class="hud__pot" id="potEl" hidden>
+            <span class="pot__label">底池</span><b id="potValue">0</b>
+          </div>
+
+          <!-- 手牌一览:3D 里牌小看不清,这里用清晰的正面牌列出来 -->
+          <section class="handstrip" id="handStrip">
+            <header class="handstrip__head">
+              <span class="handstrip__title">手牌一览</span>
+              <!-- ★ 「退出本局」的常驻入口。
+                   放在这里而不是顶栏,理由:
+                     ① 顶栏在手机上本来就在横向溢出(用户要靠盲滑才能摸到右边的按钮),
+                        再塞一个按钮等于把问题做大 —— 这次改动的主体就是「顶栏不许溢出」;
+                     ② 手牌一览是手机上**唯一常驻可见**的整块面板(顶栏会被挤、操作条位置是
+                        算出来的、侧栏默认收起),它的标题行在手机上又是浮在公共牌行右端的
+                        (见 mobile.css),加一个按钮不占任何额外高度 ——
+                        这一点很关键:底栏每多 1px 都会从 3D 区里扣(这个仓库为底栏重叠
+                        和高度瓜分踩过好几次坑)。
+                   桌面上它也一起显示(标题行本来就是一行 flex),不做设备判断:
+                   少一套「只在某端出现」的分支,就少一处对不上的地方。
+                   ⚠️ id 必须是 btnExitGame,**不能**叫 btnExitHome ——
+                      playermode.mjs 里有一条断言钉住「抽屉专属的退出按钮没有泄漏到主界面」,
+                      查的正是 btnExitHome 这个 id,重名会把那条断言弄红。
+                   (这段注释在模板字符串里:**不要写反引号**,会把模板提前结束掉。) -->
+              <button class="btn btn--tiny btn--danger handstrip__exit" id="btnExitGame"
+                      title="结束当前牌局,回到主页重新选模式">↩<span class="handstrip__exitLabel"> 退出本局</span></button>
+              <span class="handstrip__note" id="handStripNote"></span>
+              <!-- 摊牌胜率的口径说明。
+                   ⚠️ 不要复用 .handstrip__note 那一格:它在手机上被 display:none 掉了
+                   (那是「x/y 张」这种可省文案),而「这是假设此刻全部摊牌的胜率」
+                   不能省 —— 否则容易被当成「他现在赢面多大」。
+                   放在标题右侧、不占行高:胜率徽标加在每个人「名字」那一行里,
+                   加高任何一行都会挤掉手机上的牌面。 -->
+              <span class="handstrip__eqhint" id="handStripEq" hidden></span>
+              <button class="btn btn--tiny" id="btnHandStrip" title="收起 / 展开"><span class="handstrip__toggleLabel">收起</span></button>
+            </header>
+            <!-- 公共牌单独来一份:桌面上是 3D 小模型,斜着看看不清牌面 -->
+            <div class="handstrip__board" id="handStripBoard">
+              <span class="handstrip__boardLabel">公共牌</span>
+              <span class="handstrip__street" id="boardStreet">未开始</span>
+              <!-- 一手结束后出现的「第 N 手记录」。
+                   放在这里而不是操作条里:操作条上那几个块位置都是算出来的,
+                   塞进去会互相压住(实测按钮盖在提示行上、文字还被截断)。
+                   这个位置紧挨着「本手结束」,而且荷官/玩家两种模式都看得到。 -->
+              <button class="btn btn--pill handstrip__review" id="btnReview" hidden>📋 第 1 手记录</button>
+              <span class="handstrip__boardCards" id="boardCards"></span>
+              <span class="handstrip__boardHint" id="boardHint"></span>
+            </div>
+            <div class="handstrip__body" id="handStripBody"></div>
+          </section>
+        </div>
+
+        <aside class="sidepanel" id="sidePanel">
+          <div class="sidepanel__tabs">
+            <button class="tab is-active" data-panel="log" id="tabLog">荷官记录</button>
+            <button class="tab" data-panel="think">思考记录</button>
+            <button class="btn btn--tiny" id="btnClearLog">清空</button>
+          </div>
+          <div class="log" id="logEl"></div>
+          <div class="thinklog" id="thinkLogEl" hidden></div>
+          <div class="sidepanel__foot" id="statLine">—</div>
+        </aside>
+
+        <footer class="actionbar">
+          <div class="actionbar__follow">
+            <button class="btn btn--primary" id="btnNext" disabled>👉 下一位</button>
+            <button class="btn btn--ghost" id="btnMode" title="手动 / 手动+连打 / 自动">👆 手动</button>
+            <button class="btn btn--ghost" id="btnSpeed" title="节奏快慢">⏱ 1.0x</button>
+          </div>
+          <div class="actionbar__hint" id="hintEl"></div>
+          <div class="actionbar__btns">
+            <button class="btn btn--primary btn--big" id="btnDeal">🂠 发牌 / 下一手</button>
+          </div>
+        </footer>
+
+        <div class="toast" id="toastEl"></div>
+      </div>
+    `;
+
+    const q = (id) => root.querySelector('#' + id);
+    this.canvas = q('gl');
+    const stage = createStage(this.canvas);
+    this.THREE = THREE;
+    this.renderer = stage.renderer;
+    this.scene = stage.scene;
+    this.camera = stage.camera;
+    const baseResize = stage.resize;
+    this.resize = () => {
+      baseResize();
+      // 统一视口尺寸的来源:拉伸和取景都用**canvas 的真实宽高比**。
+      // 别让两边各自去读 window —— 移动端首帧 canvas 还没尺寸时,
+      // 两边读到的可能不一样(实测:桌子没拉长、镜头却被拉得很远)。
+      const w = this.canvas.clientWidth || window.innerWidth || 1440;
+      const h = this.canvas.clientHeight || window.innerHeight || 800;
+      const aspect = Math.max(0.6, w / Math.max(1, h));
+      // 先让桌子按新视口重算拉伸(长桌),再取景 —— 顺序反了相机会按旧尺寸算
+      this.table.layoutTable?.(aspect);
+      this.fitCamera(aspect);
+      // 座位半径跟画面宽度有关(窄屏要往中间收,宽屏拉长),所以窗口变化时要重排一次
+      if (this.plates.size) {
+        this.table.buildSeats(this.plates.size);
+        this.table.resync?.();
+      }
+    };
+
+    addRoom(this.scene);
+    addLights(this.scene);
+    this.table = new Table3D(this.scene, {
+      getPersona: (seat) => hooks.getPersona?.(seat),
+      // 2D 立绘由「该座位用的模型」决定,所以要把解析结果透传下去
+      getPortrait: (seat) => hooks.getPortrait?.(seat),
+    });
+    /**
+     * ★ 把扑克的道具层挂上去(牌面 / 筹码 / 公共牌区 / 底池 / 荷官的手)。
+     *
+     * 这是 2b 拆 3D 的接缝:桌椅座位立绘相机在 sceneCore 里(通用),
+     * 桌上摆什么在这里。换游戏就是换这一行 —— 新游戏照 props/poker/ 写一份
+     * 自己的道具层,sceneCore 一行都不用改(契约见 sceneCore/propLayer.js)。
+     */
+    this.table.addPropLayer(new PokerProps());
+
+    this.dom = {
+      topbar: root.querySelector('.topbar'),
+      handTag: q('handTag'), blindTag: q('blindTag'), deckTag: q('deckTag'),
+      street: q('streetTag'), statLine: q('statLine'),
+      log: q('logEl'), thinkLog: q('thinkLogEl'),
+      plates: q('platesEl'), bubble: q('bubbleEl'), pot: q('potEl'), potValue: q('potValue'),
+      handStrip: q('handStrip'), handStripBody: q('handStripBody'),
+      handStripNote: q('handStripNote'), handStripEq: q('handStripEq'), btnHandStrip: q('btnHandStrip'),
+      btnExitGame: q('btnExitGame'),
+      boardRow: q('handStripBoard'), boardCards: q('boardCards'),
+      boardStreet: q('boardStreet'), boardHint: q('boardHint'), btnReview: q('btnReview'),
+      hint: q('hintEl'), toast: q('toastEl'), sidePanel: q('sidePanel'),
+      actionbar: root.querySelector('.actionbar'),
+      btnDeal: q('btnDeal'), btnNext: q('btnNext'), btnMode: q('btnMode'), btnSpeed: q('btnSpeed'),
+      btnPeek: q('btnPeek'), btnThinkLog: q('btnThinkLog'),
+      btnModels: q('btnModels'), btnLog: q('btnLog'), btnSetup: q('btnSetup'),
+      logBtnLabel: q('logBtnLabel'), tabLog: q('tabLog'),
+      btnClearLog: q('btnClearLog'),
+      tabs: [...root.querySelectorAll('.tab')],
+    };
+
+    this.plates = new Map();     // seat -> {node, anchor}
+    this._tmp = new THREE.Vector3();
+    this._pending = null;        // 待渲染的 view/ctx
+    this._clock = new THREE.Clock();
+
+    /**
+     * 思考气泡。DOM 与定位在 sceneCore(通用),这里只把「右边界」告诉它 ——
+     * 侧栏展开时最右侧座位的气泡要夹在侧栏左边,否则只露出一个字。
+     */
+    this.bubble = new ThinkingBubble({
+      node: this.dom.bubble,
+      table: this.table,
+      anchorOf: (seat) => this.plates.get(seat)?.anchor || null,
+      rightLimit: () => {
+        const sp = this.dom.sidePanel;
+        if (!sp || sp.classList.contains('is-collapsed')) return Infinity;
+        const r = sp.getBoundingClientRect();
+        return r.width > 40 ? r.left : Infinity;
+      },
+    });
+
+    for (const t of this.dom.tabs) {
+      t.addEventListener('click', () => this.setPanel(t.dataset.panel));
+    }
+
+    // 手牌一览可以收起
+    this.handStripOpen = true;
+    this.dom.btnHandStrip.addEventListener('click', () => {
+      this.handStripOpen = !this.handStripOpen;
+      this.dom.handStrip.classList.toggle('is-collapsed', !this.handStripOpen);
+      this._syncHandStripLabel();
+    });
+
+    // 「退出本局」:只通知外面。**这里不写任何退出流程** ——
+    // 抽屉里那个按钮、返回键、这一个入口共用 app.js 的同一套收尾
+    // (见 setup3d.requestExit 的注释)。
+    this.dom.btnExitGame?.addEventListener('click', () => this.hooks.onExitGame?.());
+
+    this._loop = this._loop.bind(this);
+    requestAnimationFrame(this._loop);
+  }
+
+  /** 窄窗口时把相机往后拉一点,保证整张桌子都在画面里(名牌也不会挤在一起) */
+  fitCamera(aspectIn) {
+    const w = this.canvas.clientWidth || window.innerWidth;
+    const h = this.canvas.clientHeight || window.innerHeight;
+    // 优先用调用方传进来的(fresh)宽高比,保证与 layoutTable 用的是同一个数
+    const aspect = Number.isFinite(aspectIn) && aspectIn > 0
+      ? aspectIn : Math.max(0.6, w / Math.max(1, h));
+    const ref = 1.56;                                  // 参考宽高比
+    // 座位跟着人数外扩,相机也要相应后退,不然最外侧的人会被裁掉
+    const seats = this.plates.size || 6;
+    const spread = 0.9 + seats * 0.028;
+    let k = Math.min(1.5, Math.max(1, Math.sqrt(ref / aspect))) * spread;
+
+    /**
+     * 横向也要装得下。
+     *
+     * 垂直视野固定(40°),所以宽屏时可见**宽度** = 高度 × aspect —— 理论上很宽。
+     * 但牌桌在宽屏下会被拉长成长桌(见 table3d 的 stretchFor),两侧的人跟着外移,
+     * 所以不能只看垂直:必须确认「最外侧座位 + 人物半宽」仍在水平视野内。
+     *
+     * 这里按 pinhole 模型反推需要的 z:
+     *   可见半宽 = camZ × tan(fovY/2) × aspect
+     * 不足就把相机沿原方向后退(按同一比例缩放 y,保持俯角不变)。
+     */
+    const half = this.table?.outerHalfWidth?.() || 0;
+    if (half > 0) {
+      const halfFovY = (this.camera.fov * Math.PI / 180) / 2;
+      const needZ = half / (Math.tan(halfFovY) * aspect);
+      if (needZ > 8.4 * k) k = needZ / 8.4;
+    }
+
+    // 桌子被拉长(长桌)时把相机抬高一点 —— 视角更接近俯视,
+    // 桌子的近侧桌沿在屏幕上就不会横扫那么宽,两端的人不容易压到桌面上。
+    const stretch = this.table?.stretchX || 1;
+    const lift = 1 + Math.max(0, stretch - 1) * 0.45;
+
+    this.camBaseY = 4.3 * k * lift;
+    this.camBaseZ = 8.4 * k;
+    this.camera.aspect = aspect;
+    this.camera.updateProjectionMatrix();
+  }
+
+  /* ---------------- 渲染循环 ---------------- */
+  _loop() {
+    if (!this.running) return;
+    const dt = this._clock.getDelta();
+    const t = this._clock.elapsedTime;
+    void dt;
+
+    /**
+     * 布局自愈:每帧比一下 canvas 的真实尺寸,变了就重排。
+     *
+     * 为什么需要:移动端(尤其带动态地址栏的浏览器)首帧 canvas 常常还没有
+     * 真实尺寸,那时算出来的**拉伸系数和相机距离都是错的**;而 resize 事件
+     * 不一定会在尺寸稳定后补发一次。用户实测到的现象就是
+     * 「桌子没被拉长、镜头却被拉得很远」—— 一次算错就永久留着了。
+     * 每帧比一次尺寸是最省事也最稳的兜底(尺寸没变时只是一次属性读取)。
+     */
+    {
+      const cw = this.canvas.clientWidth, ch = this.canvas.clientHeight;
+      if (cw > 0 && ch > 0 && (cw !== this._lastW || ch !== this._lastH)) {
+        this._lastW = cw; this._lastH = ch;
+        this.resize();
+      }
+    }
+
+    // 相机轻微呼吸感,让画面不像静止图片
+    if (!this.camBaseY) this.fitCamera();
+    if (!this._frozen) {
+      this.camera.position.y = this.camBaseY + Math.sin(t * 0.5) * 0.03;
+      this.camera.position.z = this.camBaseZ;
+      this.camera.lookAt(0, 0.3, -1.0);
+    }
+    // 发牌 / 飞牌动画:每帧推进一次(内部自己清理已结束的,不会越积越多)
+    updateCardAnimations(performance.now());
+    // 座位整体正对相机(人物 + 椅子 + 头顶标记)。
+    // 必须每帧做:相机有呼吸动画(上面刚改过 position.y 并 lookAt),不是静止的。
+    // 注意是 faceSeats 而不是只转立绘 —— 只转立绘会让椅子和人物错开,见它的注释。
+    this.table.faceSeats?.(this.camera);
+    this._projectPlates(Math.min(0.05, dt || 0.016));
+    // 玩家模式:下注条的位置跟着底部两条的实际布局走
+    if (this.mode === 'player') this.layoutPlayerBar();
+    this.renderer.render(this.scene, this.camera);
+    requestAnimationFrame(this._loop);
+  }
+
+  /**
+   * 每帧的 HUD 定位。
+   * 头顶名牌已经去掉了(改用 3D 三角指示器),这里只剩两件事:
+   *   · 底池标签跟着底池位置走;
+   *   · 思考气泡跟着说话那个座位的头顶走,并夹在可见范围内。
+   */
+  _projectPlates(dt = 0.016) {
+    const w = this.canvas.clientWidth || window.innerWidth;
+    const h = this.canvas.clientHeight || window.innerHeight;
+    void dt;
+
+    // 底池标签
+    if (this.dom.pot && !this.dom.pot.hidden) {
+      this._tmp.set(0.82, 0.72, -0.48).project(this.camera);
+      const x = (this._tmp.x * 0.5 + 0.5) * w;
+      const y = (-this._tmp.y * 0.5 + 0.5) * h;
+      this.dom.pot.style.transform = `translate(-50%, -50%) translate(${x.toFixed(1)}px, ${y.toFixed(1)}px)`;
+    }
+    // 思考气泡:锚点**每帧**从人物的实际包围盒取(在 ThinkingBubble 里做),
+    // 不能用建座位时的缓存 —— 座位重排(改人数 / 改窗口大小)之后缓存就失效了,
+    // 气泡会跑到别人头上。
+    this.bubble.layout(this.camera, this.canvas, this._tmp);
+  }
+
+
+  /**
+   * 手牌一览:3D 里的小牌看不清牌面,这里用清晰的正面牌再列一遍。
+   * 显示规则跟 3D 场景完全一致(盖着 / 只看公共牌 / 全部翻开 + 摊牌自动亮牌)。
+   * 头顶名牌去掉之后,名字/筹码/位置(大小盲、按钮位)也都在这里显示。
+   */
+  renderHandStrip(view, ctx) {
+    const body = this.dom.handStripBody;
+    const personaOf = (seat) => ctx.personaMap?.get(seat);
+    let faceUpCount = 0;
+    const parts = [];
+
+    this.renderBoardRow(view);
+
+    // 摊牌胜率:只有荷官模式会给(ctx.equity 为 null 时整块不显示)。
+    // 先找出最高的一份,用来高亮「现在最可能赢的人」。
+    const eqMap = ctx.equity?.pct || null;
+    let eqTop = -1;
+    if (eqMap) {
+      for (const p of view.players) {
+        const v = eqMap.get(p.seat);
+        if (Number.isFinite(v) && v > eqTop) eqTop = v;
+      }
+    }
+
+    for (const p of view.players) {
+      const persona = personaOf(p.seat);
+      const isShowdown = view.handOver && !p.folded && p.inHand && ctx.showdownReveal;
+      // 玩家模式:我自己那一行亮牌(自己的牌当然看得见),但弃牌之后也盖上 ——
+      // 跟别家规则保持一致,不然「已弃牌还亮着牌」看着很奇怪。
+      const isMe = ctx.humanSeat !== null && ctx.humanSeat !== undefined
+        && p.seat === ctx.humanSeat && p.inHand && !p.folded;
+      const faceUp = (isMe || ctx.revealAll || isShowdown) && p.hole?.some((c) => c !== null);
+      const cards = (p.hole || []).filter((c) => c !== null);
+      if (faceUp) faceUpCount += cards.length;
+
+      const cardsHtml = faceUp && cards.length
+        ? cards.map((c) => SceneTable.cardHtml(c)).join('')
+        : '<span class="handrow__back"></span><span class="handrow__back"></span>';
+
+      const state = !p.inHand ? 'out'
+        : p.folded ? 'folded'
+          : p.allIn ? 'allin'
+            : view.actor === p.seat ? 'actor' : '';
+
+      // 位置标签:只在「这一手还在牌局里」时显示(弃牌/淘汰的座位没有位置可言,
+      // 否则会看到好几个 seat 都顶着 D)
+      const pos = p.inHand ? (view.positions?.[p.seat] || '') : '';
+      const posCls = pos === 'BTN' ? 'pos--btn' : pos === 'SB' ? 'pos--sb' : pos === 'BB' ? 'pos--bb' : '';
+      const delta = ctx.deltas?.find((d) => d.seat === p.seat);
+      const deltaTxt = delta && view.handOver
+        ? `<span class="handrow__delta ${delta.delta > 0 ? 'is-up' : delta.delta < 0 ? 'is-down' : ''}">${delta.delta > 0 ? '+' : ''}${fmt(delta.delta)}</span>`
+        : '';
+
+      // accent 色点:立绘由模型决定,同一个模型被多个座位用到时立绘一样,
+      // 光看牌桌分不清谁是谁 —— 这枚小圆点用的是该座位立绘的 accent 色,
+      // 和人物脚下的圈同色,对着看一眼就能对上号。
+      const accent = this.table?.hooks?.getPortrait?.(p.seat)?.accent || '';
+      const dot = accent
+        ? `<i class="handrow__dot" style="background:${accent}" title="立绘色调"></i>`
+        : '';
+
+      // 摊牌胜率徽标:加在**座位名那一行**的最后。
+      // 为什么钉在这一行:手牌一览在手机上有 max-height(web/mobile.css),
+      // 行高一变就会把牌面挤出去(这仓库踩过「底部牌面被裁掉」)。
+      // 名字这行本来就有富余,加个短徽标不会加高任何东西 —— 只会让这一行
+      // 略宽一点,而手牌一览本来就是横向可滚的。
+      // 弃牌 / 淘汰的人拿不到胜率(他们已经不参与了)。
+      const eq = eqMap?.get(p.seat);
+      const eqHtml = Number.isFinite(eq)
+        ? `<span class="handrow__eq${eq === eqTop && eqTop > 0 ? ' is-top' : ''}"`
+          + ' title="摊牌胜率:假设此刻全部亮牌,他赢下这一手的概率(不含后续下注,同分按人数平分)">'
+          + `${Math.round(eq * 100)}%</span>`
+        : '';
+
+      parts.push(`
+        <div class="handrow handrow--${state}" data-seat="${p.seat}">
+          <div class="handrow__who">
+            ${dot}
+            <span class="plate__name">${esc(persona?.name || p.name || `座位${p.seat + 1}`)}</span>
+            ${pos ? `<span class="posbadge ${posCls}">${pos === 'BTN' ? 'D' : pos}</span>` : ''}
+            ${eqHtml}
+          </div>
+          <div class="handrow__cards">${cardsHtml}</div>
+          <div class="handrow__meta">
+            <span class="handrow__stack">${p.allIn || (p.stack <= 0 && p.inHand) ? '全下' : fmt(p.stack)}</span>
+            ${deltaTxt}
+            ${p.lastAction?.label && !view.handOver ? `<span class="handrow__act">${p.lastAction.label}</span>` : ''}
+          </div>
+        </div>`);
+    }
+
+    body.innerHTML = parts.join('');
+    const total = view.players.filter((p) => p.inHand).length * 2;
+    const inPlayerMode = ctx.humanSeat !== null && ctx.humanSeat !== undefined;
+    // 说明性文字尽量少:能一眼看懂的就不写。
+    // 荷官模式只留「亮了几张」这种确实有用的计数;玩家模式连计数都不用写。
+    this.dom.handStripNote.textContent = inPlayerMode
+      ? ''
+      : ctx.revealAll
+        ? `${faceUpCount}/${total} 张`
+        : faceUpCount > 0
+          ? `${faceUpCount}/${total} 张`
+          : '';
+
+    // 摊牌胜率的标题徽标。只在荷官模式出现 —— 玩家模式 ctx.equity 恒为 null,
+    // 这里连「计算中」都不会显示(玩家绝不能看到别人的胜率)。
+    const eqHint = this.dom.handStripEq;
+    if (eqHint) {
+      const info = ctx.equity;
+      if (info) {
+        eqHint.hidden = false;
+        eqHint.textContent = '摊牌胜率';
+        eqHint.title = '假设此刻全部亮牌,每个人赢下这一手的概率。'
+          + (info.exact
+            ? '(穷举了所有可能的补牌,是精确值)'
+            : `(${info.samples} 次蒙特卡洛采样)`)
+          + '\n不含「能不能打到摊牌」,也不按底池分摊:同牌力的人按人数平分。';
+      } else if (ctx.equityPending && !inPlayerMode) {
+        eqHint.hidden = false;
+        eqHint.textContent = '摊牌胜率 计算中…';
+        eqHint.title = '正在模拟:假设此刻全部亮牌,每个人赢下这一手的概率';
+      } else {
+        eqHint.hidden = true;
+        eqHint.textContent = '';
+        eqHint.removeAttribute('title');
+      }
+    }
+  }
+
+  /**
+   * 公共牌单独渲染一行。
+   * 桌面上的公共牌是 3D 小模型,坐着斜看容易看不清牌面,所以在这里再来一份正面牌。
+   */
+  renderBoardRow(view) {
+    if (!this.dom.boardCards) return;
+    const board = view.board || [];
+    const streetText = view.handOver
+      ? '本手结束'
+      : (this.boardStreetText || view.streetLabel || '未开始');
+    this.dom.boardStreet.textContent = streetText;
+    const slots = [];
+    for (let i = 0; i < 5; i++) {
+      if (i < board.length) slots.push(SceneTable.cardHtml(board[i]).replace('minicard', 'boardcard'));
+      else slots.push('<span class="boardcard boardcard--empty">·</span>');
+    }
+    this.dom.boardCards.innerHTML = slots.join('');
+    // 空位本身已经说明了还差几张,不用再写一句
+    this.dom.boardHint.textContent = '';
+  }
+
+  /**
+   * 显示 / 隐藏「第 N 手记录」按钮。
+   *
+   * 这个按钮挂在手牌一览的公共牌行上(紧挨着「本手结束」那个标签),
+   * 而不是操作条里 —— 操作条上的块位置都是按实际高度算出来的,
+   * 硬塞一个进去会跟提示行重叠,而且窄屏下文字会被截断(实测踩过)。
+   *
+   * @param {boolean} on
+   * @param {string} [label] 按钮文字,例如「📋 第 3 手记录」
+   */
+  setReviewEnabled(on, label) {
+    const b = this.dom.btnReview;
+    if (!b) return;
+    b.hidden = !on;
+    if (on && label) b.textContent = label;
+  }
+
+  /** 点「第 N 手记录」时通知外面(由 app.js 绑定到回顾面板) */
+  onReviewClick(fn) {
+    const b = this.dom.btnReview;
+    if (!b) return;
+    b.addEventListener('click', () => fn?.());
+  }
+
+  /** 一张牌的正面 HTML(点数 + 花色) */
+  static cardHtml(id) {    if (id === null || id === undefined) return '<span class="handrow__back"></span>';
+    const SUITS = ['♠', '♥', '♦', '♣'];
+    const rank = ((id >> 2) + 2);
+    const suit = id & 3;
+    const label = { 11: 'J', 12: 'Q', 13: 'K', 14: 'A' }[rank] || String(rank);
+    const red = suit === 1 || suit === 2;
+    return `<span class="minicard${red ? ' minicard--red' : ''}">`
+      + `<b>${label}</b><i>${SUITS[suit]}</i></span>`;
+  }
+
+  /** 名牌尺寸(现在只用于思考气泡的避让),节点可能不存在,统一做保护 */
+  _measurePlates() {
+    for (const p of this.plates.values()) {
+      if (!p.node) continue;
+      const r = p.node.getBoundingClientRect();
+      if (r.width) { p.w = r.width; p.h = r.height; }
+    }
+  }
+
+  destroy() {
+    this.running = false;
+    this.renderer.dispose();
+  }
+
+  /* ---------------- 座位与名牌 ---------------- */
+
+  buildSeats(count) {
+    this.table.buildSeats(count);
+    // 头顶名牌已经去掉,这里只需要座位锚点(给思考气泡定位用)
+    for (const p of this.plates.values()) p.node?.remove();
+    this.plates.clear();
+    // 用 3D 指示牌代替头顶名牌:这里只记座位锚点,供思考气泡定位
+    const anchors = this.table.seatAnchors();
+    for (let seat = 0; seat < count; seat++) {
+      const r = {
+        node: null,
+        anchor: anchors.get(seat) || new THREE.Vector3(),
+        x: undefined, y: undefined, w: 0, h: 0,
+      };
+      this.plates.set(seat, r);
+    }
+    this._lastView = null;
+  }
+
+  /** 重排之后再画一次当前状态(座位位置变了,名牌锚点也要跟着换) */
+  resync() {
+    if (!this._lastView) return;
+    const anchors = this.table.seatAnchors();
+    for (const [seat, p] of this.plates) {
+      const a = anchors.get(seat);
+      if (a) p.anchor = a;
+    }
+    this.updateSeats(this._lastView, this._lastCtx || {});
+  }
+
+  updateSeats(view, ctx) {
+    this._lastView = view;
+    this._lastCtx = ctx;
+    if (this.plates.size !== view.players.length) this.buildSeats(view.players.length);
+    // 座位与人数一致时,只做「同步」,不重建(重建会把中央的牌也清掉)
+    this.table.syncSeats(view, ctx);
+
+    // 头顶名牌已经去掉:名字/筹码/位置都在「手牌一览」与侧栏里,
+    // 3D 场景里改用头顶三角指示器(轮到谁谁高亮 + 大小盲标注)。
+
+    // 思考气泡:内容与定位都在 sceneCore 的 ThinkingBubble 里(通用),
+    // 这里只把「谁在思考 / 能不能给文字 / 动作气泡」交给它。
+    // 玩家模式也会显示气泡(让人知道 AI 在思考),但不给文字 —— revealThinking=false。
+    this.bubble.update(ctx, ctx.personaMap);
+    // 兼容:定位与部分调用方读的是 this.thinkingSeat
+    this.thinkingSeat = this.bubble.seat;
+
+    // 手牌一览跟着一起刷新
+    this.renderHandStrip(view, ctx);
+  }
+
+  updateBoard() { /* 公共牌在 3D 里由 Table3D.update 处理 */ }
+  updateBurn() { /* 同上 */ }
+  updateYou() { /* 荷官没有手牌;场景下方是荷官的手 */ }
+
+  updatePot(amount) {
+    this.dom.potValue.textContent = fmt(amount);
+    this.dom.pot.hidden = !(amount > 0);
+  }
+
+  updateDealerInfo() { /* 荷官信息并进底部提示与侧栏脚注 */ }
+
+  updateTopbar(view, info, streetText) {
+    // ⚠️ 第几手这个标签在极窄的竖屏(412px)上也可能被省略号截断,
+    //    所以同样要给 title —— 顶栏那几条「被截断必须有 title」的断言
+    //    会把没 title 的截断项直接判失败(实测抓过 handTag)。
+    this.dom.handTag.textContent = `第 ${view.handNo} 手`;
+    this.dom.handTag.title = `第 ${view.handNo} 手`;
+    // 盲注:两种升盲各自的进度都显示出来(第几档 / 本档已打多少手)
+    let blind = `盲注 ${view.smallBlind} / ${view.bigBlind}`;
+    if (view.bbAnte > 0) blind += ` · 大盲前注 ${view.bbAnte}`;
+    else if (view.ante > 0) blind += ` · 前注 ${view.ante}`;
+    if (view.blindLevelUp && view.blindLevel >= 0 && view.blindLevelHands > 0) {
+      // ★ 单位是**手**(与设置面板里的「每 N 手升一档」同一个单位)。
+      //   这里原来写的是「本档 i/N 回合」—— 那个「回合」指的是个人回合(orbit),
+      //   9 人桌一个回合要 9 手,用户看到「本档 0/3 回合」以为设了没生效。单位必须跟着引擎改。
+      // ★ 周期 N 必须取 view.blindLevelHands(引擎那边的可配置值),绝不能在这里写死 ——
+      //   否则设置里改成 5,顶栏还显示「本档 i/20 手」,看起来就是「设了没生效」。
+      //   本档第几手由引擎算好(blindLevelHandsInLevel,与「每 N 手翻倍」那条路的
+      //   blindUpHandsInTier 同一套口径),这里不再自己取模:手数与 orbits 是两种计数,
+      //   拿 orbits 取模会算出一个「看起来对、其实跟升档时机无关」的数。
+      //   仍然夹一道上限:中途把 N 调小时,界面上宁可显示 N/N,
+      //   也不要出现「本档 12/5 手」这种自相矛盾的数字。
+      const inLevel = Math.min(view.blindLevelHands, Math.max(0, view.blindLevelHandsInLevel | 0));
+      blind += ` · 第 ${view.blindLevel + 1}/${view.blindLevelCount} 档(本档 ${inLevel}/${view.blindLevelHands} 手)`;
+    }
+    // 注:「每 N 手盲注翻倍」(blindUpEvery)的用户入口已撤掉,顶栏不再显示它那一档进度。
+    //     引擎里这条能力还在,万一配置里被置成非 0,顶栏也只是不显示,
+    //     不会出现「顶栏说 10/10 手、盲注却翻了倍」这种对不上的显示。
+    this.dom.blindTag.textContent = blind;
+    // ★ 手机上这一段会被省略号截断(mobile.css 里 .topbar__left 是可压缩的),
+    //   所以把**全文**塞进 title:截断只是不让它挤掉右边的按钮,信息本身不能丢。
+    //   (之前 title 里只有「升盲模式每 N 手升一档」这句设置说明,悬停看不到盲注数值。)
+    this.dom.blindTag.title = [blind, view.blindLevelUp
+      ? `升盲模式:每过 ${view.blindLevelHands} 手按档位表升一档(0 = 不按档位升盲;在设置里改)`
+      : '盲注固定(可在设置里打开升盲模式并设置升盲周期)'].join('\n');
+    this.dom.deckTag.textContent = view.shortDeck ? '短牌 36 张' : '标准 52 张';
+    this.dom.street.textContent = view.handOver ? '本手结束' : (streetText || view.streetLabel || '等待开局');
+    this.dom.street.className = 'street street--' + (view.handOver ? 'over' : view.street);
+    this.boardStreetText = streetText || view.streetLabel || '';
+    if (info) this.dom.statLine.textContent = info;
+  }
+
+  resetSeatsCache() {
+    for (const p of this.plates.values()) {
+      if (!p.node) continue;
+      p.node.classList.remove('is-winner', 'is-actor', 'is-folded', 'is-out', 'is-allin');
+      const d = p.node.querySelector('.plate__delta');
+      if (d) { d.textContent = ''; d.className = 'plate__delta'; }
+      const a = p.node.querySelector('.plate__action');
+      if (a) a.hidden = true;
+    }
+  }
+
+  celebrate(seats) {
+    // 头顶名牌去掉之后,赢家的反馈靠:座位脚下的金色指示器 + 中央横幅 + 手牌一览的高亮
+    void seats;
+  }
+
+  showBanner(text, sub = '', ms = 2400) {
+    const b = el('div', 'banner');
+    b.innerHTML = '<div class="banner__main"></div><div class="banner__sub"></div>';
+    b.querySelector('.banner__main').textContent = text;
+    b.querySelector('.banner__sub').textContent = sub;
+    this.root.querySelector('.screen').appendChild(b);
+    setTimeout(() => { b.classList.add('banner--out'); setTimeout(() => b.remove(), 500); }, ms);
+  }
+
+  /* ---------------- 日志 ---------------- */
+
+  static stamp() {
+    const d = new Date();
+    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
+  }
+
+  pushLog(entry) {
+    const line = el('div', `log__line log__line--${entry.kind}`);
+    line.innerHTML = `<span class="log__icon">${LOG_ICON[entry.kind] || '·'}</span>
+      <span class="log__time">${SceneTable.stamp()}</span><span class="log__text"></span>`;
+    line.querySelector('.log__text').textContent = entry.text;
+    this.dom.log.appendChild(line);
+    while (this.dom.log.children.length > 500) this.dom.log.removeChild(this.dom.log.firstChild);
+    this.dom.log.scrollTop = this.dom.log.scrollHeight;
+  }
+
+  pushThink({ seat, name, persona, model, handNo, street, thinking, action, source }) {
+    const item = el('div', 'think__item');
+    item.innerHTML = `
+      <div class="think__head"><b class="think__name"></b><span class="think__tag"></span>
+        <span class="think__time">${SceneTable.stamp()}</span></div>
+      <div class="think__text"></div>
+      <div class="think__foot"><span class="think__action"></span><span class="think__meta"></span></div>`;
+    item.querySelector('.think__name').textContent = name || `座位${seat + 1}`;
+    item.querySelector('.think__tag').textContent = persona?.tag || '';
+    item.querySelector('.think__text').textContent = thinking || '(没有输出思考)';
+    const act = item.querySelector('.think__action');
+    act.textContent = action || '';
+    item.querySelector('.think__meta').textContent =
+      `第 ${handNo} 手 · ${street || ''} · ${model || '本地策略'}${source === 'fallback' ? ' · 本地兜底' : ''}`;
+    this.dom.thinkLog.appendChild(item);
+    while (this.dom.thinkLog.children.length > 300) this.dom.thinkLog.removeChild(this.dom.thinkLog.firstChild);
+    this.dom.thinkLog.scrollTop = this.dom.thinkLog.scrollHeight;
+  }
+
+  clearLog() {
+    this.dom.log.innerHTML = '';
+    this.dom.thinkLog.innerHTML = '';
+  }
+
+  setPanel(which) {
+    // 玩家模式下思考记录一律不给看(按钮藏了,但快捷键 / 外部调用仍可能走到这里)
+    if (this.mode === 'player' && which === 'think') which = 'log';
+    for (const t of this.dom.tabs) t.classList.toggle('is-active', t.dataset.panel === which);
+    this.dom.log.hidden = which !== 'log';
+    this.dom.thinkLog.hidden = which !== 'think';
+  }
+
+  setSidePanelOpen(open) {
+    this.dom.sidePanel.classList.toggle('is-collapsed', !open);
+    this.dom.btnLog.classList.toggle('is-active', open);
+    // 手牌一览的宽度跟着侧栏走:CSS 里靠 body 上的这个类切换
+    document.body.classList.toggle('is-sidepanel-open', !!open);
+  }
+
+  /** 侧栏是不是展开的(和 isHandStripCollapsed 对称:外面不该去读 DOM 的类名) */
+  isSidePanelOpen() {
+    return !this.dom.sidePanel.classList.contains('is-collapsed');
+  }
+
+  /** 手牌一览是否已收起 */
+  isHandStripCollapsed() {
+    return this.dom.handStrip.classList.contains('is-collapsed');
+  }
+
+  /** 收起 / 展开手牌一览(加注面板展开时用得上) */
+  setHandStripCollapsed(collapsed) {
+    if (this.isHandStripCollapsed() === collapsed) return;
+    this.handStripOpen = !collapsed;
+    this.dom.handStrip.classList.toggle('is-collapsed', collapsed);
+    this._syncHandStripLabel();
+  }
+
+  /**
+   * 只改「收起 / 展开」两个字的**内层 span**。
+   *
+   * ⚠️ 千万别写 this.dom.btnHandStrip.textContent = …:那会把按钮里
+   *    <span class="handstrip__toggleLabel"> 整个抹掉,而手机上是靠这个 span
+   *    把文字收成图标的(见 mobile.css)—— 抹掉之后手机上会多出一段文字,
+   *    顶栏/手牌一览的宽度全跟着变。三个地方都在改这两个字,统一走这里。
+   */
+  _syncHandStripLabel() {
+    const b = this.dom.btnHandStrip;
+    if (!b) return;
+    const label = b.querySelector('.handstrip__toggleLabel');
+    const txt = this.handStripOpen ? '收起' : '展开';
+    if (label) label.textContent = txt;
+    else b.textContent = txt;
+  }
+
+  /**
+   * 切换玩法模式。
+   * 玩家模式下荷官的那几个特权(底牌三态、手动控节奏)没有意义,收起来。
+   */
+  setMode(mode, humanSeat) {
+    this.mode = mode;
+    this.humanSeat = humanSeat ?? null;
+    const isPlayer = mode === 'player';
+    document.body.classList.toggle('is-player-mode', isPlayer);
+
+    // 底牌三态 / 思考记录 —— 这些都是荷官专属的
+    // (原来这里还藏过「气泡开关」,那个按钮已删,见顶栏模板里的说明)
+    if (this.dom.btnPeek) this.dom.btnPeek.hidden = isPlayer;
+    if (this.dom.btnThinkLog) this.dom.btnThinkLog.hidden = isPlayer;
+    // 「下一位」是荷官控节奏用的;玩家模式下节奏由自己的操作驱动
+    if (this.dom.btnNext) this.dom.btnNext.hidden = isPlayer;
+    if (this.dom.btnMode) this.dom.btnMode.hidden = isPlayer;
+
+    // 玩家模式下侧栏只剩「牌局记录」一个页签(思考记录不给看)
+    for (const t of this.dom.tabs) {
+      if (t.dataset.panel === 'think') t.hidden = isPlayer;
+    }
+    if (isPlayer) this.setPanel('log');
+    this.setLogLabel(isPlayer ? '牌局记录' : '荷官记录');
+
+    this.layoutPlayerBar();
+  }
+
+  /** 「荷官记录」这个说法在玩家模式下不成立,换成中性的「牌局记录」 */
+  setLogLabel(text) {
+    const a = this.dom.logBtnLabel;
+    const b = this.dom.tabLog;
+    if (a) a.textContent = text;
+    if (b) b.textContent = text;
+  }
+
+  /**
+   * 玩家模式:把三个按钮(以及展开后的加注浮层)放到「手牌一览」上方。
+   *
+   * 关键点:
+   *   · 只读布局,不改布局 —— 手牌一览不会被收起来,一直是开着的;
+   *   · 不按元素高度反推位置(内容一变高度就变,那一帧会读到旧值,结果压住手牌一览),
+   *     而是算出「底边该贴在哪条线上」(CSS 变量 --pbar-bottom),整块自己往上长。
+   */
+  layoutPlayerBar() {
+    const bar = this.dom.pbar;
+    if (!bar || !this.dom.actionbar) return;
+
+    // 底部两条:操作条常驻,手牌一览可以收起(但玩家模式下我们不主动收)
+    const actionTop = this.dom.actionbar.getBoundingClientRect().top;
+    const strip = this.dom.handStrip;
+    const stripTop = strip && !strip.classList.contains('is-collapsed')
+      ? strip.getBoundingClientRect().top
+      : null;
+    const ceiling = stripTop === null ? actionTop : Math.min(stripTop, actionTop);
+
+    // 整组(信息条 / 提示行 / 按钮)的**底边**就贴在这条线下面一点。
+    //
+    // 现在容器是正常盒子(flex 列,有高度),底边用 bottom 直接定,
+    // 里面的块按 order 从下往上堆 —— 所以「整组底边贴在哪」是唯一变量,
+    // 不需要再回写任何高度变量,也不会跟测量形成反馈回路。
+    // (旧写法是零尺寸锚点 + 每块 translateY(-100%),两层百分比叠加,
+    //  实测差 36px 且会越量越偏,已经重写掉了。)
+    const GAP_ABOVE_CEILING = 2;
+    const bottomPx = window.innerHeight - ceiling + GAP_ABOVE_CEILING;
+    bar.style.setProperty('--pbar-bottom', `${Math.round(bottomPx)}px`);
+
+    // 按钮区实际多高就写多少 —— 别用常量猜。加注浮层的偏移量靠这个变量,
+    // 猜错的话浮层会压在按钮上(踩过一次:常量写 61,实际渲染出来不是)。
+    // 用 offsetHeight:它不含 transform,量出来稳定。
+    const acts = this.dom.pbarActs;
+    if (acts) {
+      const ah = acts.offsetHeight;
+      if (ah > 0) bar.style.setProperty('--pbar-acts-h', `${ah}px`);
+    }
+  }
+
+  /**
+   * 把玩家模式那三个按钮的容器交给场景。
+   *
+   * 这个元素是 app.js 建好后再插到界面上的,场景构造时它还不在 DOM 里 ——
+   * 所以不能在构造函数里 querySelector,必须由外面主动交进来。
+   * (踩过坑:构造时查不到 → dom.pbar 一直是 null → 每帧的定位函数直接 return,
+   *  结果按钮位置只能靠 CSS 兜底值,展开加注浮层时直接盖住手牌一览。)
+   */
+  setPlayerBarEl(el) {
+    this.dom.pbar = el || null;
+    this.dom.pbarActs = el ? el.querySelector('.pbar__acts') : null;
+    this.layoutPlayerBar();
+  }
+
+  /** 玩家模式:关掉荷官专属界面 */
+  setDealerOnlyUI(on) {
+    if (this.dom.btnPeek) this.dom.btnPeek.hidden = !on;
+  }
+
+  /* ---------------- 小工具 ---------------- */
+
+  toast(text, kind = 'info', ms = 2600) {
+    const t = this.dom.toast;
+    t.textContent = text;
+    t.className = `toast toast--show toast--${kind}`;
+    clearTimeout(this._toastTimer);
+    this._toastTimer = setTimeout(() => { t.className = 'toast'; }, ms);
+  }
+
+  setHint(text, busy = false) {
+    this.dom.hint.textContent = text;
+    this.dom.hint.classList.toggle('is-busy', busy);
+  }
+
+  setDealEnabled(on) {
+    // 玩家模式:牌局进行中不给「发牌 / 下一手」(要等这一手打完)
+    const isPlayer = this.mode === 'player';
+    const midHand = isPlayer && !on;
+    this.dom.btnDeal.disabled = !on;
+    this.dom.btnDeal.classList.toggle('is-disabled', !on);
+    this.dom.btnDeal.hidden = midHand;
+  }
+
+  setNextEnabled(on) {
+    this.dom.btnNext.disabled = !on;
+    this.dom.btnNext.classList.toggle('is-waiting', on);
+  }
+
+  /**
+   * 「退出本局」按钮的显隐。
+   *
+   * 为什么不能只靠「有 engine」这种隐式判断来显示它:
+   *   主页 / 设置页时牌桌上什么都还没有,这时候摆一个「退出本局」是自相矛盾的
+   *   (没有「本局」可退),点了也只是再回一次主页。
+   * 由 app.js 在**开局**与**退出**两处显式开关:那两个地方正好是「牌局是否存在」
+   * 的唯一真相来源,在这里自己猜状态迟早会和它对不上。
+   */
+  setExitEnabled(on) {
+    if (this.dom.btnExitGame) this.dom.btnExitGame.hidden = !on;
+  }
+
+  get seatsCount() { return this.plates.size; }
+}

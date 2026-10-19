@@ -20,10 +20,10 @@
  * ⚠️ sendSync 会阻塞渲染进程,只在**即将被回收**时用,不要放进常规保存路径。
  */
 
-// ⚠️ 路径是 ../core/gameStore.js(buildweb 的「相对 import 必须能解析到文件」那一步会拦):
+// ⚠️ 路径是 ../shared/gameStore.js(buildweb 的「相对 import 必须能解析到文件」那一步会拦):
 //    gameStore.js 归在 core/ 下(它只依赖引擎,不依赖任何 UI),这里只是**读一个键名常量**,
 //    不把 store 的创建逻辑拖过来 —— 免得 web 层和 core 层互相依赖。
-import { SNAPSHOT_KEY } from '../core/gameStore.js';
+import { SNAPSHOT_KEY } from './gameStore.js';
 
 /* ------------------------------------------------------------ 桌面版:IPC */
 

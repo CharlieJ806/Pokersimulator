@@ -1,21 +1,30 @@
 /**
- * 模型分配面板:给每个座位单独选厂商、模型与性格。
+ * 模型分配面板 = **全局设置**(对所有游戏生效)。
  *
  * 三层结构:
  *   1. 全局密钥:每个厂商一个 Key(填一次,所有座位共用);
  *   2. 默认模型:没单独指定的座位用它;
  *   3. 逐座位覆盖:想让某个人用别的模型就单独选。
  *
+ * ⚠️ 归属:这里的一切(Key / 默认厂商 / 默认模型 / 中转站 / 推理档位 /
+ *    逐座位的厂商-模型-Key-性格)都写进配置的 `global` 层 —— 用户明确要求
+ *    「座位与模型分配算全局」,以后接狼人杀、谁是卧底也不用重填。
+ *    牌桌规则(人数 / 盲注 / 升盲)在 src/games/poker/ui/setup.js,那是**游戏设置**,
+ *    写进 games[当前游戏],只对那一个游戏生效。两个面板各开各的,互不覆盖。
+ *
  * 名字与性格是**分开**的:
  *   · 座位显示名由**模型**决定(相同模型自动加序号),见 ai/portraits.js;
  *   · 性格只决定打法(松紧、激进度、风险偏好),可以逐座位指定,默认随机。
  */
 
-import { PERSONAS } from '../ai/personas.js';
+import { PERSONAS } from '../games/poker/personas.js';
 import { RELAY_PROTOCOLS, normalizeProtocol } from '../shared/llmStream.mjs';
 // 连通性测试的判定逻辑放在共享模块里,不写在这儿 —— 那部分要能被
 // `node tools/relayprobe.mjs` 纯 Node 直接跑(见 shared/llmProbe.mjs 的头注释)
 import { runProbe, describeProbe, seatProbeSpec, keyProbeSpec } from '../shared/llmProbe.mjs';
+// 座位数是**游戏设置**(模型分配是全局的,但面板得知道这局有几个座位)。
+// 读法收敛到 gameCfg(),不写死 games.poker。
+import { gameCfg } from '../shared/gameDefaults.mjs';
 
 /** 拼进 innerHTML 的用户输入(模型名、Key 显示名)一律转义 —— 引号还会截断 value 属性 */
 function esc(s) {
@@ -56,7 +65,10 @@ export function createModelsPanel(root, opts = {}) {
         <div>
           <h1>给每个 AI 分配模型</h1>
           <p class="setup__sub">
-            每个座位都是独立的 AI 代理,可以分别用不同的厂商和模型 —— 比如让爱施压的那位用快模型,
+            <b>全局设置</b> —— 这里配的 Key、模型与逐座位分配对<b>所有游戏</b>生效
+            (以后接狼人杀、谁是卧底也不用重填);牌桌规则(人数 / 盲注 / 升盲)在设置页里,
+            那部分只对<b>本游戏</b>生效。
+            <br>每个座位都是独立的 AI 代理,可以分别用不同的厂商和模型 —— 比如让爱施压的那位用快模型,
             让算赔率的那位用聪明一点的模型。没有 Key 的座位会自动退回内置的本地策略,牌局照样打得下去。
           </p>
         </div>
@@ -372,10 +384,11 @@ export function createModelsPanel(root, opts = {}) {
   function keepSeatEdits() {
     if (!wrap.querySelector('[data-seat-provider]')) return;
     const c = collect();
-    state.seatProviders = c.seatProviders;
-    state.seatModels = c.seatModels;
-    state.seatPersonas = c.seatPersonas;
-    state.seatCustomKeys = c.seatCustomKeys;
+    // collect() 是**配置补丁**(global / games / ui),座位相关的几格都在 global 里。
+    state.seatProviders = c.global.seatProviders;
+    state.seatModels = c.global.seatModels;
+    state.seatPersonas = c.global.seatPersonas;
+    state.seatCustomKeys = c.global.seatCustomKeys;
   }
 
   function collect() {
@@ -410,19 +423,26 @@ export function createModelsPanel(root, opts = {}) {
       if (seatCustomKeys[seat] && !keptIds.has(seatCustomKeys[seat])) seatCustomKeys[seat] = null;
     }
     return {
-      defaultProvider: q('defProvider').value,
-      model: q('defModel').value.trim(),
-      keys,
-      seatProviders,
-      seatModels,
-      seatPersonas,
-      seatCustomKeys,
-      customEndpoint: q('customEndpoint')?.value.trim() || '',
-      // 推理档位:与接口地址同一个区块、同一条「界面 → 配置」的路。
-      // 认不出的值一律回落到最低档(见 llmStream.mjs 的 normalizeReasoningLevel)——
-      // 少了这个兜底,老配置(没有这个字段)会让下拉显示空白,用户以为档位丢了。
-      reasoningLevel: q('reasoningLevel')?.value || 'low',
-      customKeys,
+      // ★ 这个面板写的**只有 global 一层**(全局设置)。
+      //   它不写 games / ui:座位数是游戏设置、节奏是 ui,都不归它管 ——
+      //   顺手写一遍就等着「在模型面板点保存,把设置页刚调的人数/节奏盖回去」。
+      global: {
+        defaultProvider: q('defProvider').value,
+        model: q('defModel').value.trim(),
+        keys,
+        seatProviders,
+        seatModels,
+        seatPersonas,
+        seatCustomKeys,
+        customEndpoint: q('customEndpoint')?.value.trim() || '',
+        // 推理档位:与接口地址同一个区块、同一条「界面 → 配置」的路。
+        // 认不出的值回落到默认档(见 llmStream.mjs 的 normalizeReasoningLevel)——
+        // 少了这个兜底,老配置(没有这个字段)会让下拉显示空白,用户以为档位丢了。
+        // ⚠️ 默认是 'default'(什么都不发),不是 'low' —— 对本来不思考的模型,
+        //    'low' 是**打开**推理(实测 42 倍 token),理由详见 config.cjs。
+        reasoningLevel: q('reasoningLevel')?.value || 'low',
+        customKeys,
+      },
     };
   }
 
@@ -440,10 +460,12 @@ export function createModelsPanel(root, opts = {}) {
   /**
    * 组装「测试用」的配置快照。
    * 复用 collect():它读的就是 DOM 里的现值,顺手也把中转站地址/各 Key 的协议算好了。
+   * 形状是**配置本身**(global 在 global 里)—— app.js 的 agentCfg 只读
+   * global + providerList,所以这里补上 providerList;游戏层它不需要。
    */
   function testCfgSnapshot() {
     const c = collect();
-    return { ...c, providerList: providers, game: { seats: state.seats } };
+    return { global: c.global, providerList: providers };
   }
 
   /** 写结果文本(三种状态:测试中… / ✅ / ❌) */
@@ -519,27 +541,30 @@ export function createModelsPanel(root, opts = {}) {
 
   function fill(cfg) {
     providers = cfg.providerList || providers;
-    let customKeys = Array.isArray(cfg.customKeys) ? cfg.customKeys.filter((k) => k && k.key) : [];
+    // 这个面板用的是 global 那一层;座位数只是为了知道画几行 ——
+    // 它属于**游戏设置**,所以用 gameCfg() 取(不写死 .games.poker)。
+    const gl = cfg.global || {};
+    let customKeys = Array.isArray(gl.customKeys) ? gl.customKeys.filter((k) => k && k.key) : [];
     // 老配置没有 protocol 字段 → 补 'openai'(最常见形态)。
     // 不补的话下拉会显示空白,用户以为协议丢了。
     customKeys = customKeys.map((k) => ({ ...k, protocol: normalizeProtocol(k.protocol) }));
     // 一个 Key 都没有时先给一行空的,免得用户找不到入口
     if (!customKeys.length) customKeys = [{ id: 'k1', label: 'Key 1', key: '', protocol: 'openai' }];
     state = {
-      defaultProvider: cfg.defaultProvider || 'deepseek',
-      seatProviders: cfg.seatProviders || {},
-      seatModels: cfg.seatModels || {},
-      seatPersonas: cfg.seatPersonas || {},
+      defaultProvider: gl.defaultProvider || 'deepseek',
+      seatProviders: gl.seatProviders || {},
+      seatModels: gl.seatModels || {},
+      seatPersonas: gl.seatPersonas || {},
       seatNames: state.seatNames || {},
-      customEndpoint: cfg.customEndpoint || '',
-      reasoningLevel: cfg.reasoningLevel || 'low',
+      customEndpoint: gl.customEndpoint || '',
+      reasoningLevel: gl.reasoningLevel || 'low',
       customKeys,
-      seatCustomKeys: cfg.seatCustomKeys || {},
-      keys: cfg.keys || {},
-      seats: cfg.game?.seats ?? state.seats,
+      seatCustomKeys: gl.seatCustomKeys || {},
+      keys: gl.keys || {},
+      seats: gameCfg(cfg).seats ?? state.seats,
     };
-    // 兼容老配置:只有 endpoint/apiKey/model 时,迁移成 deepseek 的 key
-    if (!Object.keys(state.keys).length && cfg.apiKey) state.keys = { deepseek: cfg.apiKey };
+    // 兼容老配置:只有 apiKey(单厂商时代的字段)时,迁移成 deepseek 的 key
+    if (!Object.keys(state.keys).length && gl.apiKey) state.keys = { deepseek: gl.apiKey };
     if (!q('keyList')) return;
     renderKeys();
     if (q('customEndpoint')) q('customEndpoint').value = state.customEndpoint || '';
@@ -564,8 +589,9 @@ export function createModelsPanel(root, opts = {}) {
 
   function updateInfo() {
     const c = collect();
-    const usable = providers.filter((p) => p.id !== 'custom' && (p.noKey || (c.keys[p.id] || '').trim())).length;
-    q('mdlInfo').textContent = `${state.seats} 个座位 · 已配置 ${usable} 家厂商的密钥 · 默认 ${c.defaultProvider}/${c.model || '默认模型'}`;
+    const gl = c.global;
+    const usable = providers.filter((p) => p.id !== 'custom' && (p.noKey || (gl.keys[p.id] || '').trim())).length;
+    q('mdlInfo').textContent = `${state.seats} 个座位 · 已配置 ${usable} 家厂商的密钥 · 默认 ${gl.defaultProvider}/${gl.model || '默认模型'}`;
   }
 
   q('defProvider').addEventListener('change', () => { syncDefaultModel(true); updateInfo(); });

@@ -116,7 +116,8 @@ button { font-family: inherit; }
   box-shadow: 0 8px 20px -10px rgba(42, 37, 31, .6);
 }
 .btn--primary:hover { background: var(--ink-2); border-color: var(--ink-2); box-shadow: 0 10px 24px -10px rgba(42, 37, 31, .65); }
-.btn:focus-visible, .modecard:focus-visible, .tab:focus-visible, .sizebtn:focus-visible {
+.btn:focus-visible, .modecard:focus-visible, .gamecard:focus-visible,
+.tab:focus-visible, .sizebtn:focus-visible {
   outline: 2px solid var(--gold-2); outline-offset: 2px;
 }
 .btn:disabled, .btn.is-disabled { opacity: .4; cursor: not-allowed; transform: none; box-shadow: none; }
@@ -781,7 +782,7 @@ input[type="range"]::-webkit-slider-thumb {
 .setup__footBtns { display: flex; gap: 10px; flex-wrap: wrap; }
 
 /* ============================================================
-   主页:选模式(荷官 / 玩家)
+   主页:先选游戏,再选模式(荷官 / 玩家)
    ============================================================ */
 .home {
   background:
@@ -820,6 +821,33 @@ input[type="range"]::-webkit-slider-thumb {
   background: var(--ink);
   border-radius: 15px;
   box-shadow: 0 12px 24px -12px rgba(42, 37, 31, .7);
+}
+
+/* ── 游戏卡那一屏 ────────────────────────────────────────────────────
+   卡片本身复用 .modecard 那套视觉(见下面 .modecard 选择器组里的 .gamecard),
+   这里只决定**排几列**:三个游戏一行放得下(1080 的卡片减去两侧 30 的留白
+   ÷3 ≈ 340,正文三行也不会挤);屏幕窄下来先两列再一列。
+   ⚠️ 用 auto-fit 而不是写死 3 列:以后加到第四个游戏时,一行放不下就自己换行,
+      不用回来改这条规则(getGame 的数量在注册表里,样式表不该知道)。 */
+.home__games {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+  padding: 18px 30px 12px;
+}
+
+/* 第二层(某个游戏的模式卡)的抬头:返回 + 这个游戏的标题。
+   ⚠️ hidden 必须显式写 display:none —— `.home__modes` 自己带 display:grid,
+      作者样式的 display 会盖掉浏览器默认的 `[hidden]{display:none}`,
+      于是「切回第一层」看起来像没生效。(.home__resume[hidden] 早就踩过这个坑。) */
+#homeModes[hidden] { display: none; }
+.home__layerHead {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 16px 30px 0;
+}
+.home__layerHead .btn { min-height: 32px; padding-top: 0; padding-bottom: 0; }
+.home__layerTitle {
+  font-size: 13px; font-weight: 700; letter-spacing: .04em; color: var(--text-dim);
 }
 
 .home__modes {
@@ -869,7 +897,35 @@ input[type="range"]::-webkit-slider-thumb {
   .home__resumeBtns .btn { flex: 1; }
 }
 
-.modecard {
+/* ── 全局排行榜(主页第三层)────────────────────────────────────────
+   与游戏卡 / 模式卡一样是**一层**,不是悬浮弹窗:主页这张卡片是
+   `overflow:hidden` 的滚动容器、祖先还带 backdrop-filter —— 在这两种祖先下
+   `position:fixed` 会相对祖先定位并被裁掉(手机上弹窗会跑出可见区域)。
+   内容卡直接复用 `.uc__rank`(底子/圆角/表格排版与「本场积分」同一套),
+   这里只决定这一层的留白。 */
+.home__board { padding: 18px 30px 12px; }
+/* 抬头已经在 .home__board 里留过边了,别再叠一层 */
+.home__board .home__layerHead { padding: 0; }
+/* hidden 必须显式写:.home__board 将来若加了 display 会被作者样式盖掉
+   (`.home__modes[hidden]` / `.home__resume[hidden]` 都踩过这个坑)。 */
+.home__board[hidden] { display: none; }
+.home__boardBody { margin-top: 4px; }
+.home__boardBody .uc__rankTable { font-size: 12.5px; }
+@media (max-width: 820px) {
+  .home__board { padding: 14px 16px 8px; }
+}
+
+/* ── 卡片:两张都用这一套 ──────────────────────────────────────────────
+   .modecard  = 第二层,某个游戏的玩法卡(荷官 / 玩家)
+   .gamecard  = 第一层,游戏卡(德州扑克 / 狼人杀 / 谁是卧底)
+   用户要求「主页风格不变」,所以游戏卡**一个像素都不新造**:两条选择器写在一起,
+   就是把同一套底子、圆角、阴影、动效复用给它。卡内部的类名也照抄 modecard__*,
+   同样是为了白蹭下面的排版规则。
+   ⚠️ 游戏卡的 root 不能也叫 .modecard:`.modecard` 已经是「玩法卡」的判据
+      (smoke.mjs 断言主页上正好两张、且都可点),两者混在一起会让那条断言失去意义。
+   ⚠️ 哪天真要改主页卡片的视觉,改这一组就够了 —— 不要给 .gamecard 再写一份。 */
+.modecard,
+.gamecard {
   position: relative; text-align: left; cursor: pointer;
   display: flex; flex-direction: column; gap: 9px;
   padding: 20px 22px 18px;
@@ -879,8 +935,10 @@ input[type="range"]::-webkit-slider-thumb {
   box-shadow: var(--shadow-sm);
   transition: transform .16s ease, border-color .16s ease, box-shadow .16s ease, background .16s ease;
 }
-.modecard:active { transform: translateY(-1px) scale(.995); }
-.modecard:hover {
+.modecard:active,
+.gamecard:active { transform: translateY(-1px) scale(.995); }
+.modecard:hover,
+.gamecard:hover {
   transform: translateY(-3px);
   border-color: var(--gold-2);
   box-shadow: 0 0 0 3px var(--gold-soft), var(--shadow-md);
@@ -933,11 +991,34 @@ input[type="range"]::-webkit-slider-thumb {
 }
 .modecard__cta b { transition: transform .16s ease; }
 .modecard:hover .modecard__cta b { transform: translateX(4px); }
+.gamecard:hover .modecard__cta b { transform: translateX(4px); }
 
-/* 还没开放的模式:整体压淡 */
-.modecard--soon { opacity: .72; }
-.modecard--soon:hover { opacity: .95; border-color: var(--line-2); box-shadow: var(--shadow-sm); }
-.modecard--soon .modecard__cta { color: var(--text-dim); }
+/* 还没开放的卡(模式卡与游戏卡共用):整体压淡 */
+.modecard--soon,
+.gamecard--soon { opacity: .72; }
+.modecard--soon:hover,
+.gamecard--soon:hover { opacity: .95; border-color: var(--line-2); box-shadow: var(--shadow-sm); }
+.modecard--soon .modecard__cta,
+.gamecard--soon .modecard__cta { color: var(--text-dim); }
+
+/* 灰卡的「灰」要压得更狠一点。
+   模式卡的 .72 在**白色卡面 + 米色底**上几乎看不出区别(实测截图里两张灰卡和
+   能点的那张一样白),而用户要一眼看出「这张点不动」。所以游戏卡单独再压一档,
+   顺便把图标去色 —— 彩色 emoji 是屏幕上最抢眼的东西,留着它就更像能点。 */
+.gamecard--soon { opacity: .62; }
+.gamecard--soon .modecard__icon { filter: grayscale(1); opacity: .75; }
+
+/* 灰卡 = `<button disabled>`。disabled 已经让浏览器**不派发点击**,但 `:hover`
+   照样会命中 —— 不把「抬起 + 金边 + 提亮」按回去,鼠标划过去还是像能点
+   (实测截图里灰卡悬停会浮起来,和旁边能点的扑克卡一模一样)。 */
+.gamecard:disabled { cursor: default; }
+.gamecard:disabled:hover,
+.gamecard:disabled:active {
+  transform: none;
+  border-color: var(--line);
+  box-shadow: var(--shadow-sm);
+  opacity: .62;      /* 压回灰态:上面 --soon:hover 的 .95 会把它点亮 */
+}
 
 /* 点「玩家模式」时的就地说明与抖动 */
 .modecard__note {
@@ -1385,3 +1466,221 @@ body.is-player-mode .actionbar__hint { display: none; }
 @media (max-height: 700px) {
   .handstrip { --mcw: 22px; --mch: 31px; }
 }
+
+/* ============================================================
+   谁是卧底(src/games/undercover/ui/screen.js)
+
+   为什么用一套独立的 .uc 前缀:
+   · 扑克的 .screen/.topbar/.handstrip/.actionbar 都带自己的定位与设备适配,
+     直接复用会把「下注条算出来的位置」这类规则一起带进来;
+   · 新游戏只共用**原子件**(.btn / .toast / .bubble / .grid-vignette),
+     版面自己排。加第三个游戏时也照这个办法,不用改扑克那套。
+   ============================================================ */
+.uc { position: relative; height: 100%; width: 100%; overflow: hidden; }
+.uc__gl {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  display: block; z-index: 0;
+}
+.uc__top {
+  position: absolute; left: 0; right: 0; top: 0; z-index: 20;
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 9px 16px;
+}
+.uc__brand { display: flex; align-items: center; gap: 9px; }
+.uc__icon { font-size: 20px; }
+.uc__title { font-weight: 800; letter-spacing: .02em; }
+.uc__tag {
+  font-size: 12px; padding: 3px 9px; border-radius: 999px;
+  background: var(--panel); border: 1px solid var(--line); color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.uc__tag--phase.is-vote { color: #7a4b9a; border-color: rgba(122, 75, 154, .4); }
+.uc__topBtns { display: flex; gap: 8px; }
+
+/* 上帝面板:只有观看模式才会被填内容(玩家模式连 innerHTML 都清空) */
+.uc__god {
+  position: absolute; right: 14px; top: 58px; width: min(520px, 38vw);
+  max-height: 56vh; overflow: auto; z-index: 15;
+  background: var(--panel); border: 1px solid var(--line-2); border-radius: 14px;
+  box-shadow: var(--shadow-sm); padding: 10px 12px; backdrop-filter: blur(6px);
+}
+.uc__godHead { display: flex; flex-direction: column; gap: 2px; margin-bottom: 6px; }
+.uc__godHead > span:first-child { font-size: 12.5px; font-weight: 700; color: var(--text); }
+.uc__godHint { font-size: 11px; color: var(--text-faint); }
+.uc__godTable { width: 100%; border-collapse: collapse; font-size: 12px; }
+.uc__godTable th {
+  text-align: left; font-weight: 600; color: var(--text-faint);
+  padding: 3px 4px; border-bottom: 1px solid var(--line); white-space: nowrap;
+}
+.uc__godTable td { padding: 4px; border-bottom: 1px dashed var(--line); vertical-align: top; }
+.uc__godWord { font-weight: 800; color: var(--gold); white-space: nowrap; }
+.uc__godName { color: var(--text-dim); white-space: nowrap; }
+.uc__godSay { color: var(--text-dim); max-width: 170px; }
+.uc__godGuess { font-size: 11.5px; color: var(--text-dim); }
+.uc__godTable tr.is-out td { opacity: .45; text-decoration: line-through; }
+.is-und { color: var(--red); }
+.is-civ { color: var(--green); }
+
+/* 描述矩阵:这个游戏的核心推理材料,两种模式都看得到(只含公开发言) */
+.uc__matrix {
+  position: absolute; left: 14px; bottom: 14px; z-index: 14;
+  max-width: min(680px, 52vw); max-height: 34vh; overflow: auto;
+  background: var(--panel); border: 1px solid var(--line-2); border-radius: 14px;
+  padding: 8px 10px; box-shadow: var(--shadow-sm); backdrop-filter: blur(6px);
+}
+.uc__mxHead {
+  display: flex; justify-content: space-between; gap: 8px;
+  font-size: 12px; font-weight: 700; color: var(--text); margin-bottom: 4px;
+}
+.uc__mxHead span { font-weight: 400; color: var(--text-dim); }
+.uc__mxTable { border-collapse: collapse; font-size: 12px; width: 100%; }
+.uc__mxTable th {
+  font-weight: 600; color: var(--text-faint); padding: 2px 6px;
+  border-bottom: 1px solid var(--line); white-space: nowrap;
+}
+.uc__mxTable td { padding: 3px 6px; border-bottom: 1px dashed var(--line); }
+.uc__mxTable tr.is-out td { opacity: .4; text-decoration: line-through; }
+.uc__mxEmpty { color: var(--text-faint); }
+.uc__mxLow { color: var(--gold); font-style: italic; }
+.uc__mxVotes { margin-top: 4px; font-size: 11.5px; color: var(--text-dim); }
+
+/* 玩家模式:我的词 */
+.uc__me {
+  position: absolute; left: 14px; top: 58px; z-index: 15;
+  background: var(--panel); border: 1px solid var(--line-2); border-radius: 14px;
+  padding: 10px 16px; box-shadow: var(--shadow-sm); backdrop-filter: blur(6px);
+}
+.uc__meLabel { font-size: 11.5px; color: var(--text-faint); letter-spacing: .1em; }
+.uc__meWord { font-size: 30px; font-weight: 800; color: var(--gold); line-height: 1.15; }
+.uc__meWord.is-blank { color: #7a4b9a; font-size: 22px; }
+.uc__meHint { font-size: 12px; color: var(--text-dim); max-width: 262px; }
+.uc__me.is-out { opacity: .55; }
+
+/* 现场记录 */
+.uc__side {
+  position: absolute; right: 14px; bottom: 14px; width: min(300px, 26vw);
+  max-height: 30vh; z-index: 12; display: flex; flex-direction: column;
+  background: var(--panel); border: 1px solid var(--line-2); border-radius: 14px;
+  overflow: hidden; box-shadow: var(--shadow-sm);
+}
+.uc__sideHead {
+  font-size: 12px; font-weight: 700; padding: 6px 10px;
+  border-bottom: 1px solid var(--line); color: var(--text-dim);
+}
+.uc__log { overflow: auto; padding: 6px 10px; font-size: 12px; line-height: 1.5; }
+.uc__logLine { color: var(--text); }
+.uc__logLine.is-warn { color: #7a5a1e; }
+.uc__logLine.is-err { color: var(--red); }
+.uc__logLine.is-ok { color: var(--green); }
+
+/* 本场积分 / 排名(scoring.js 的 rankingHtml 产出的那一块)
+   ⚠️ 这里**不新造视觉**:底子、圆角、边框、表格排版全部照抄上帝面板/描述矩阵
+      那几个面板(同一套 --panel / --line / --text-dim),只是换了位置与内容。
+      一块 HTML 两处显示:大厅里(--lobby)算历史、结算时(--overlay)当结果卡。 */
+.uc__rank {
+  background: var(--panel); border: 1px solid var(--line-2); border-radius: 14px;
+  box-shadow: var(--shadow-sm); padding: 10px 12px; backdrop-filter: blur(6px);
+}
+.uc__rank--lobby { margin: 0 0 16px; max-height: 34vh; overflow: auto; }
+.uc__rank--overlay {
+  position: absolute; left: 50%; top: 46%; transform: translate(-50%, -50%);
+  z-index: 32; width: min(520px, 90vw); max-height: 46vh; overflow: auto;
+  box-shadow: var(--shadow-md);
+}
+.uc__rank[hidden] { display: none !important; }
+.uc__rankHead { display: flex; justify-content: space-between; gap: 8px; font-size: 12.5px; font-weight: 700; color: var(--text); margin-bottom: 6px; }
+.uc__rankHead span { font-weight: 400; color: var(--text-dim); font-size: 11.5px; }
+.uc__rankTable { width: 100%; border-collapse: collapse; font-size: 12px; }
+.uc__rankTable th {
+  text-align: left; font-weight: 600; color: var(--text-faint);
+  padding: 3px 4px; border-bottom: 1px solid var(--line); white-space: nowrap;
+}
+.uc__rankTable td { padding: 4px; border-bottom: 1px dashed var(--line); font-variant-numeric: tabular-nums; }
+.uc__rankTable tr.is-you td { background: rgba(196, 162, 88, .12); }
+.uc__rankTable tr.is-you td:first-child { border-radius: 6px 0 0 6px; }
+.uc__rankName { color: var(--text); font-weight: 600; }
+.uc__rankName b { font-weight: 600; color: var(--gold); }
+.uc__rankMeta { color: var(--text-dim); }
+.uc__rankDetail { margin-top: 6px; font-size: 11.5px; color: var(--text-dim); }
+.uc__rankDetailHead { font-size: 10.5px; color: var(--text-faint); letter-spacing: .08em; margin-bottom: 2px; }
+.uc__rankLine { padding: 2px 0; }
+.uc__rankLine b { color: var(--text); }
+.uc__rankLine em { font-style: normal; color: var(--text-faint); }
+.uc__rankFoot {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  margin-top: 8px; font-size: 11px; color: var(--text-faint);
+}
+.uc__rankReset { font-size: 11.5px; padding: 4px 10px; }
+.is-pos { color: var(--green); font-weight: 700; }
+.is-neg { color: var(--red); font-weight: 700; }
+.is-blank { color: #7a4b9a; }
+
+/* 玩家操作区:描述输入 / 投票按钮 */
+.uc__action {
+  position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%);
+  z-index: 30; background: var(--paper); border: 1px solid var(--line-2);
+  border-radius: 16px; padding: 12px 16px; box-shadow: var(--shadow-md);
+  max-width: min(760px, 92vw);
+}
+.uc__actHead { font-weight: 700; margin-bottom: 8px; }
+.uc__actHead b { color: var(--gold); }
+.uc__actRow { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+/* 猜词那一行:和描述那行留出距离 —— 它是一个不可撤销的动作,视觉上也要分开 */
+.uc__actRow--guess { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--line); }
+.uc__input {
+  border: 1px solid var(--line-2); background: #fff; border-radius: 10px;
+  padding: 8px 10px; font-size: 13px; min-width: 320px; font-family: inherit; color: var(--text);
+}
+.uc__input--reason { min-width: 240px; }
+.uc__input--guess { min-width: 160px; }
+.uc__actNote { font-size: 11.5px; color: var(--text-dim); margin-top: 6px; }
+.uc__actNote--inline { margin-top: 0; }
+/* 两下确认的按钮:第一下之后变红,提示「再点一次就真的交出去了」 */
+.btn.is-armed { color: var(--red); border-color: var(--red); }
+.uc__voteRow .uc__voteBtn b { color: var(--gold); margin-right: 4px; }
+
+.uc__banner {
+  position: absolute; left: 50%; top: 16%; transform: translate(-50%, -50%);
+  z-index: 31; text-align: center; display: flex; flex-direction: column; gap: 4px;
+  background: var(--paper); border: 1px solid var(--line-2); border-radius: 16px;
+  padding: 14px 34px; box-shadow: var(--shadow-md); pointer-events: none;
+}
+.uc__banner b { font-size: 26px; }
+.uc__banner span { font-size: 13px; color: var(--text-dim); }
+
+/* 大厅 / 设置 */
+.uc__lobby {
+  position: absolute; inset: 0; z-index: 60; display: flex;
+  align-items: center; justify-content: center;
+  background: rgba(58, 44, 28, .18); backdrop-filter: blur(3px);
+}
+.uc__lobby[hidden], .uc__god[hidden], .uc__matrix[hidden],
+.uc__me[hidden], .uc__action[hidden], .uc__banner[hidden] { display: none !important; }
+.uc__lobbyCard {
+  width: min(760px, 92vw); background: var(--paper); border: 1px solid var(--line-2);
+  border-radius: 20px; padding: 22px 26px;
+  box-shadow: 0 24px 60px -30px rgba(42, 37, 31, .55);
+}
+.uc__lobbyHead { display: flex; gap: 14px; align-items: center; }
+.uc__lobbyIcon { font-size: 34px; }
+.uc__lobbyHead h2 { margin: 0; font-size: 22px; }
+.uc__lobbySub { font-size: 11px; letter-spacing: .14em; color: var(--text-faint); font-weight: 500; }
+.uc__lobbyHead p { margin: 4px 0 0; font-size: 13px; color: var(--text-dim); }
+/* 5 格(人数 / 卧底 / 白板 / 轮次 / 难度):3 列排两行,比 4 列挤成一排更好读 */
+.uc__fields { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 18px 0; }
+.uc__field { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--text-dim); }
+.uc__field select {
+  font-family: inherit; font-size: 13px; padding: 7px 8px; border-radius: 10px;
+  border: 1px solid var(--line-2); background: #fff; color: var(--text);
+}
+.uc__lobbyBtns { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.uc__lobbyNote { min-height: 18px; margin: 10px 0 0; font-size: 12px; color: var(--text-dim); }
+
+@media (max-width: 900px) {
+  .uc__fields { grid-template-columns: 1fr 1fr; }
+  .uc__god { width: min(360px, 52vw); }
+  .uc__matrix { max-width: 62vw; }
+  .uc__side { width: min(240px, 40vw); }
+  .uc__rank--overlay { top: 50%; max-height: 52vh; }
+}
+

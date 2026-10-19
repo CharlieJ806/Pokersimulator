@@ -1,6 +1,11 @@
 /**
  * 导航流程回归:主页 → 模型面板 → 关闭 → 玩家模式设置页 → 逐座位分配 → 返回主页。
  *
+ * ⚠️ 主页现在是**两层**(2a 起):第一层是游戏卡(德州扑克 / 狼人杀 / 谁是卧底),
+ *    点「德州扑克」才展开第二层那两张模式卡。所以这个脚本比从前多一步:
+ *    凡是「主页上看得见、点得到」的地方,先看**游戏卡**,再点进第二层看模式卡。
+ *    (原来它直接断言 .modecard 在最上层 —— 那在两层之前是对的,现在会永远红。)
+ *
  * 这几个入口以前都是坏的(用户反馈「操作流程卡手」):
  *   · 主页「模型与 API Key」:面板打开了,但被主页整个挡在下面;
  *   · 开局设置页没有任何返回按钮;
@@ -23,7 +28,8 @@ app.whenReady().then(async () => {
     webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: false } });
   await win.loadURL(process.env.WEB_URL || 'http://127.0.0.1:5173/');
   const js = (c) => win.webContents.executeJavaScript(c, true);
-  for (let i = 0; i < 60 && !(await js("!!document.querySelector('.modecard')")); i++) await sleep(150);
+  // 等主页起来:游戏卡是 2a 起的第一层,等它比等 .modecard(第二层、默认收起)更准
+  for (let i = 0; i < 60 && !(await js("!!document.querySelector('.gamecard')")); i++) await sleep(150);
   await sleep(500);
 
   // 某个元素是不是真的「在最上面、点得到」
@@ -35,6 +41,11 @@ app.whenReady().then(async () => {
     const hit = document.elementFromPoint(r.left + r.width / 2, r.top + Math.min(r.height / 2, 20));
     return !!hit && (hit === e || e.contains(hit));
   })()`);
+  /** 主页第一层 → 第二层(点德州扑克)。只有它能进 —— 另外两张是灰卡。 */
+  const openPoker = async () => {
+    await js(`document.querySelector('.gamecard[data-game="poker"]').click()`);
+    await sleep(400);
+  };
 
   // 1. 主页 → 模型面板
   await js("document.querySelector('#homeModels').click()");
@@ -42,7 +53,9 @@ app.whenReady().then(async () => {
   ok(await onTop('#mdlClose'), '主页点「模型与 API Key」→ 模型面板真的出现在最上层');
   await js("document.querySelector('#mdlClose').click()");
   await sleep(500);
-  ok(await onTop('.modecard'), '关闭模型面板 → 回到主页');
+  ok(await onTop('.gamecard[data-game="poker"]'), '关闭模型面板 → 回到主页(游戏卡可见可点)');
+  await openPoker();
+  ok(await onTop('.modecard'), '点「德州扑克」→ 第二层两张模式卡可见可点');
 
   // 2. 玩家模式设置页 → 逐座位分配
   await js("[...document.querySelectorAll('.modecard')].find(e => /玩家/.test(e.textContent)).click()");
@@ -67,7 +80,8 @@ app.whenReady().then(async () => {
   // 4. 返回主页
   await js("document.querySelector('#setupBack').click()");
   await sleep(600);
-  ok(await onTop('.modecard'), '设置页点「返回主页」→ 主页可见可点');
+  // 退出本局 / 返回主页 = 回到**第一层**(游戏列表),不会停在第二层
+  ok(await onTop('.gamecard[data-game="poker"]'), '设置页点「返回主页」→ 主页第一层(游戏卡)可见可点');
   const mode = await js('window.__poker.mode');
   ok(mode === null, '返回主页后模式已重置', `mode=${mode}`);
   ok(!(await js("document.body.classList.contains('is-player-mode')")), '玩家模式的界面改动已撤回');

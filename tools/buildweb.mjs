@@ -18,7 +18,8 @@
  *     vendor/three.module.js
  *
  * 为什么入口不放在 web/dist/web/ 下:
- *   3D 模块里写的是 `../../vendor/three.module.js`(从 src/ui3d/ 往上两级),
+ *   3D 模块里写的是 `../../../vendor/three.module.js`(从 src/ui3d/sceneCore/ 往上三级;
+ *   道具层在 src/ui3d/props/poker/,也是三级),
  *   所以 src/ 与 vendor/ 必须和「src 的父目录」同级。入口摊在根最省事,
  *   静态服务器的根目录也直接就是 dist,不用额外配置。
  *
@@ -102,10 +103,10 @@ log(`  + vendor/ 共 ${nVendor} 个文件`);
 
 /* 3b. assets/portraits —— 2D 立绘
  *
- * 为什么必须复制:src/ui3d/portraits2d.js 用的是相对路径
- *   ../../assets/portraits/...
- * 在 Electron 里从 src/ui3d/ 往上两级 = 仓库根的 assets/;
- * 在网页版里从 web/dist/src/ui3d/ 往上两级 = web/dist/assets/,
+ * 为什么必须复制:src/ui3d/sceneCore/portraits2d.js 用的是相对路径
+ *   ../../../assets/portraits/...
+ * 在 Electron 里从 src/ui3d/sceneCore/ 往上三级 = 仓库根的 assets/;
+ * 在网页版里从 web/dist/src/ui3d/sceneCore/ 往上三级 = web/dist/assets/,
  * 所以只要把 assets/ 整体放到 dist 根,两个环境的相对路径就一致了。
  *
  * 顺带把许可与来源说明一起带上 —— CC BY-NC-SA 4.0 要求署名,
@@ -121,11 +122,11 @@ if (fs.existsSync(PORTRAIT_SRC)) {
       warn(`assets/portraits/${f} 缺失 —— 许可是 CC BY-NC-SA 4.0,署名文件不能丢`);
     }
   }
-  // manual.js 是手工素材的清单,portraits2d.js 会**静态 import** 它。
+  // manual.js 是手工素材的清单,sceneCore/portraits2d.js 会**静态 import** 它。
   // 缺了的话不是「少两个角色」而是整个模块加载失败(立绘全没),
   // 所以必须在构建期就拦住,而不是等运行时白屏。
   if (!fs.existsSync(path.join(OUT, 'assets', 'portraits', 'manual.js'))) {
-    warn('assets/portraits/manual.js 缺失 —— portraits2d.js 静态 import 它,缺了整个立绘模块会加载失败。'
+    warn('assets/portraits/manual.js 缺失 —— sceneCore/portraits2d.js 静态 import 它,缺了整个立绘模块会加载失败。'
       + '先跑 node_modules/.bin/electron tools/prepmanualportraits.mjs');
   }
 

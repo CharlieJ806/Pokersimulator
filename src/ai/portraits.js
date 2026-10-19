@@ -19,7 +19,7 @@
 /** 有立绘的角色 id(与 assets/portraits/ 下的目录名一致) */
 export const PORTRAIT_CHARS = [
   'claude', 'deepseek', 'gemini', 'glm', 'gpt',
-  // 手工加进来的:每个只有一张 idle,缺的状态自动复用(见 portraits2d.js)
+  // 手工加进来的:每个只有一张 idle,缺的状态自动复用(见 sceneCore/portraits2d.js)
   'qwen', 'grok', 'kimi', 'mimo',
 ];
 

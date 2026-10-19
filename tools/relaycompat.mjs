@@ -90,7 +90,7 @@ app.whenReady().then(async () => {
   for (let i = 0; i < 50 && !(await js('!!window.pokerAPI')); i++) await new Promise((r) => setTimeout(r, 100));
 
   const results = await js(`(async () => {
-    const { PokerAgent } = await import('./src/ai/agent.js');
+    const { PokerAgent } = await import('./src/games/poker/agent.js');
     const out = [];
     for (const model of ${JSON.stringify(MODELS)}) {
       const infos = [];

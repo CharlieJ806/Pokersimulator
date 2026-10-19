@@ -358,7 +358,7 @@ app.whenReady().then(async () => {
     '',
     '处理脚本:`tools/prepmanualportraits.mjs`(跑在 Electron 里,零依赖)。',
     '每个角色只有一张图,所以**所有状态都复用这一张**;',
-    '缺状态时的回退逻辑见 `src/ui3d/portraits2d.js` 的 `stateMeta()`。',
+    '缺状态时的回退逻辑见 `src/ui3d/sceneCore/portraits2d.js` 的 `stateMeta()`。',
     '',
   );
   fs.writeFileSync(path.join(DIR, 'MANUAL-SOURCES.md'), lines.join('\n'), 'utf8');

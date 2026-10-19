@@ -79,7 +79,21 @@ export function normalizeProtocol(p) {
  */
 export const REASONING_LEVELS = ['off', 'low', 'default'];
 
-/** 默认档位:最低但保留(用户定的,别改成 'default' —— 那样会长考到超时) */
+/**
+ * 默认档位:'low' —— 保留推理但压到各家允许的最低档。
+ *
+ * ⚠️ 曾经试过把默认改成 'default'(什么都不发),**实测证明那是错的**,已回滚:
+ *    在**游戏实际使用的 deepseek-flash** 上,同一个牌局问题:
+ *      · 'low'              → reasoning  686 字 / 211 token / 2.0s
+ *      · 'default'(什么都不发) → reasoning 3769 字 / 1156 token / 8.0s  ← 最差
+ *      · 'off'(thinking:disabled) → reasoning 0 字 / 69 token / 1.0s   ← 最优
+ *    也就是说 flash 这类模型**默认是重度思考的**,不传参数等于放任它长考
+ *    (8 秒 + 5.5 倍 token),而 'low' 是真的把它压下来了。
+ *    (教训:别拿 deepseek-chat 的测量结果推断 deepseek-flash —— chat 默认不思考,
+ *     两者的默认行为正交,见 tools/ 里那次对比实验。)
+ *    'off' 在这组测量里更快更省,但会连真的需要推理的模型一起按死,
+ *    所以不设为默认;想要极致速度的人可以在面板里选它。
+ */
 export const DEFAULT_REASONING_LEVEL = 'low';
 
 /**
@@ -95,7 +109,11 @@ export const GEMINI_THINKING_BUDGET = 512;
 /** Anthropic 思考预算的最小值 —— 官方文档规定不得小于 1024,再小上游直接 400 */
 export const ANTHROPIC_THINKING_BUDGET = 1024;
 
-/** 认不出的档位一律当默认档(low) —— 老配置里没有这个字段,不能因此变成「不设防」 */
+/**
+ * 认不出的档位一律当默认档(low) —— 老配置里没有这个字段,不能因此变成「不设防」。
+ * ⚠️ 回落成 'default'(什么都不发) 曾经试过并**实测证伪**:deepseek-flash 默认会
+ *    长考(3769 字 / 8 秒),不传参数等于放任它,详见 DEFAULT_REASONING_LEVEL 的注释。
+ */
 export function normalizeReasoningLevel(v) {
   return REASONING_LEVELS.includes(v) ? v : DEFAULT_REASONING_LEVEL;
 }

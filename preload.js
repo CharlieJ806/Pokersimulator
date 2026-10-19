@@ -24,7 +24,7 @@ contextBridge.exposeInMainWorld('pokerAPI', {
    *
    * 与网页版 web/pokerApi.js 里同名的几个方法**逐条对齐**:
    *   · 返回原样的快照对象 / { ok, error? },版本校验不在这里做
-   *     (两端共同的逻辑在 src/core/gameStore.js,只有一份);
+   *     (两端共同的逻辑在 src/shared/gameStore.js,只有一份);
    *   · 桌面版落在 userData/game.json,网页版落在 localStorage —— 位置不同、行为相同。
    *
    * ⚠️ Sync 那几个是**给「页面即将被回收」用的**(visibilitychange→hidden / pagehide):
@@ -37,6 +37,20 @@ contextBridge.exposeInMainWorld('pokerAPI', {
   getGameSync: () => ipcRenderer.sendSync('game:getSync'),
   setGameSync: (snap) => ipcRenderer.sendSync('game:setSync', snap),
   clearGameSync: () => ipcRenderer.sendSync('game:clearSync'),
+
+  /**
+   * 全局排行榜(跨游戏、跨会话的持久化战绩)。
+   *
+   * 与网页版(web/pokerApi.js 没有这三个方法 → 自动退回 localStorage)对齐:
+   * 版本校验、排序、权重换算都在 src/shared/leaderboard.mjs,这里只负责
+   * 「数据落在哪儿」—— 桌面版是 userData/leaderboard.json,网页版是 localStorage。
+   *
+   * ⚠️ 没有 Sync 版本,也**不需要**:写榜发生在「一场结束」时,界面还活着,
+   *    异步 invoke 一定能落地;而对局快照要 sendSync 是因为它可能死在页面回收前。
+   */
+  getLeaderboard: () => ipcRenderer.invoke('leaderboard:get'),
+  setLeaderboard: (board) => ipcRenderer.invoke('leaderboard:set', board),
+  clearLeaderboard: () => ipcRenderer.invoke('leaderboard:clear'),
 
   /**
    * 发起一次流式对话请求。

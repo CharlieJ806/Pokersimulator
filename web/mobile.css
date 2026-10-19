@@ -287,8 +287,9 @@ canvas#gl {
     max-width: calc(100vw - 16px);
   }
 
-  /* 主页模式卡片竖排 */
-  .home__modes { grid-template-columns: 1fr; }
+  /* 主页卡片竖排(游戏卡那一屏同理:横排三张在竖屏上每张只剩 ~110px) */
+  .home__modes,
+  .home__games { grid-template-columns: 1fr; }
 }
 
 /* ============================================================ 紧凑屏通用(手机横屏 + 竖屏/窄屏) */
@@ -400,7 +401,9 @@ canvas#gl {
   /* 设置页标题:副标题单独一行,别被拆成「Poker / Simulator」两截 */
   .setup__head h1 { font-size: 21px; }
   .setup__head h1 .setup__ver { display: block; margin: 4px 0 0 1px; }
-  .home__modes { padding: 16px 20px 8px; }
+  .home__modes,
+  .home__games { padding: 16px 20px 8px; }
+  .home__layerHead { padding: 14px 20px 0; }
   .setup__foot { padding: 12px 16px 16px; }
   .setup__footBtns { width: 100%; }
   .setup__footBtns .btn { flex: 1 1 auto; }
@@ -417,12 +420,14 @@ canvas#gl {
   button,
   .btn,
   .modecard,
+  .gamecard,
   [role="button"] {
     min-height: 40px;
   }
   /* 大按钮(开局、下注)给足 44px */
   .pbar__acts button,
   .modecard,
+  .gamecard,
   #btnStart,
   #btnDeal {
     min-height: 44px;

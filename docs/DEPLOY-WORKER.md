@@ -175,7 +175,7 @@ Deployed poker-dealer triggers (x.xx sec)
 ### 5.1 页面能开
 
 浏览器打开 `https://poker-dealer.<你的账号子域>.workers.dev`,应该看到主页
-(「扑克模拟器 · POKER SIMULATOR」+ 两张模式卡)。
+(「桌游模拟器 · TABLETOP SIMULATOR」+ 三张游戏卡,扑克那张点进去还是两张模式卡)。
 
 命令行也能快速确认:
 

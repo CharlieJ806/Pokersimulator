@@ -1,6 +1,6 @@
 {
-  "name": "德州扑克模拟器 · Poker Simulator",
-  "short_name": "扑克模拟器",
+  "name": "桌游模拟器 · Tabletop Simulator",
+  "short_name": "桌游模拟器",
   "description": "每个座位都是一个独立大语言模型的德州扑克:你当荷官看 AI 打,或者自己上桌打。",
   "lang": "zh-CN",
   "dir": "ltr",

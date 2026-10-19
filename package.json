@@ -1,9 +1,9 @@
 {
   "name": "poker-dealer-sim",
-  "productName": "德州扑克模拟器 Poker Simulator",
+  "productName": "桌游模拟器 Tabletop Simulator",
   "version": "1.0.0",
   "private": true,
-  "description": "每个座位都是一个独立大语言模型的德州扑克:你当荷官看 AI 打,或者自己上桌打。第一视角 · 独立 AI 代理 · 思考过程可看 · 手机可玩",
+  "description": "桌游模拟器:每个座位都是一个独立大语言模型。当前能玩德州扑克(你当荷官看 AI 打,或者自己上桌打),狼人杀与谁是卧底在规划中。第一视角 3D · 独立 AI 代理 · 思考过程可看 · 手机可玩",
   "main": "main.js",
   "scripts": {
     "start": "electron .",

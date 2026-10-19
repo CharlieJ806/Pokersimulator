@@ -1,0 +1,2889 @@
+{
+  "startedAt": "2026-10-19T03:12:54.422Z",
+  "model": "deepseek-flash",
+  "thinking": "off",
+  "cases": [
+    {
+      "id": "case-01-民国公馆",
+      "theme": "民国公馆",
+      "difficulty": "hard",
+      "seed": 1101,
+      "killer": 5,
+      "slots": [
+        "20:00",
+        "20:45",
+        "21:30",
+        "22:10",
+        "22:50"
+      ],
+      "murderSlot": 3,
+      "title": "雨夜暖房龙井冷",
+      "ok": true,
+      "failedChecks": [],
+      "checkMatrix": [
+        {
+          "id": "schema",
+          "name": "结构完整性(前置)",
+          "ok": true,
+          "nFailed": 0
+        },
+        {
+          "id": "timeline",
+          "name": "时间线自洽",
+          "ok": true,
+          "nFailed": 0
+        },
+        {
+          "id": "clues",
+          "name": "线索有效性",
+          "ok": true,
+          "nFailed": 0
+        },
+        {
+          "id": "solvable",
+          "name": "凶手可推导",
+          "ok": true,
+          "nFailed": 0
+        },
+        {
+          "id": "secret",
+          "name": "秘密与身份一致",
+          "ok": true,
+          "nFailed": 0
+        },
+        {
+          "id": "spoiler",
+          "name": "无泄底",
+          "ok": true,
+          "nFailed": 0
+        },
+        {
+          "id": "motif",
+          "name": "套路化检测",
+          "ok": true,
+          "nFailed": 0
+        }
+      ],
+      "warningCount": 11,
+      "warnings": [
+        "[线索有效性] 线索C4 写到了「陆婉清」但 pointsTo 不含他 —— 可能是漏标",
+        "[线索有效性] 线索C5 写到了「阿荣」但 pointsTo 不含他 —— 可能是漏标",
+        "[线索有效性] 线索C6 写到了「顾仲良」但 pointsTo 不含他 —— 可能是漏标",
+        "[线索有效性] 线索C7 写到了「阿荣」但 pointsTo 不含他 —— 可能是漏标",
+        "[套路化检测] 3 个人的动机文本反推不出类型,「动机多样性」这一项的说服力有限",
+        "[套路化检测] 角色1 标的 motiveType「恐惧」在动机文本里找不到任何对应关键词,标签与动机可能不符",
+        "[套路化检测] 角色2 标的 motiveType「情感纠葛」与动机文本更像「恐惧」",
+        "[套路化检测] 角色3 标的 motiveType「情感纠葛」在动机文本里找不到任何对应关键词,标签与动机可能不符",
+        "[套路化检测] 角色4 标的 motiveType「身份败露」在动机文本里找不到任何对应关键词,标签与动机可能不符",
+        "[套路化检测] 角色5 标的 motiveType「灭口」与动机文本更像「欠债被逼」",
+        "[套路化检测] 角色6 标的 motiveType「保命」与动机文本更像「夺产」"
+      ],
+      "repairRounds": 0,
+      "cost": {
+        "calls": 4,
+        "promptTokens": 4352,
+        "completionTokens": 2897,
+        "reasoningTokens": 0,
+        "cny": 0.03188,
+        "elapsedSec": 36.1,
+        "perCall": [
+          {
+            "pass": "characters",
+            "prompt": 1113,
+            "completion": 1161,
+            "reasoning": 0,
+            "peak": true,
+            "ms": 273,
+            "cny": 0.011514
+          },
+          {
+            "pass": "timeline",
+            "prompt": 764,
+            "completion": 632,
+            "reasoning": 0,
+            "peak": true,
+            "ms": 147,
+            "cny": 0.006584
+          },
+          {
+            "pass": "clues",
+            "prompt": 1181,
+            "completion": 716,
+            "reasoning": 0,
+            "peak": true,
+            "ms": 139,
+            "cny": 0.00809
+          },
+          {
+            "pass": "solution",
+            "prompt": 1294,
+            "completion": 388,
+            "reasoning": 0,
+            "peak": true,
+            "ms": 142,
+            "cny": 0.005692
+          }
+        ]
+      },
+      "size": {
+        "premiseChars": 188,
+        "bioChars": 442,
+        "secretChars": 232,
+        "timelineChars": 470,
+        "clueChars": 445,
+        "solutionChars": 480,
+        "clueCount": 10,
+        "timelineCount": 11
+      },
+      "session": {
+        "rounds": 7,
+        "characters": 6,
+        "calls": 42,
+        "perCall": [
+          {
+            "who": 0,
+            "round": 1,
+            "prompt": 1349,
+            "completion": 179,
+            "exact": true,
+            "cny": 0.00413
+          },
+          {
+            "who": 0,
+            "round": 2,
+            "prompt": 1470,
+            "completion": 179,
+            "exact": false,
+            "cny": 0.004372
+          },
+          {
+            "who": 0,
+            "round": 3,
+            "prompt": 1578,
+            "completion": 179,
+            "exact": false,
+            "cny": 0.004588
+          },
+          {
+            "who": 0,
+            "round": 4,
+            "prompt": 1683,
+            "completion": 179,
+            "exact": false,
+            "cny": 0.004798
+          },
+          {
+            "who": 0,
+            "round": 5,
+            "prompt": 1794,
+            "completion": 179,
+            "exact": false,
+            "cny": 0.00502
+          },
+          {
+            "who": 0,
+            "round": 6,
+            "prompt": 1907,
+            "completion": 179,
+            "exact": false,
+            "cny": 0.005246
+          },
+          {
+            "who": 0,
+            "round": 7,
+            "prompt": 2149,
+            "completion": 179,
+            "exact": true,
+            "cny": 0.00573
+          },
+          {
+            "who": 1,
+            "round": 1,
+            "prompt": 1343,
+            "completion": 179,
+            "exact": false,
+            "cny": 0.004118
+          },
+          {
+            "who": 1,
+            "round": 2,
+            "prompt": 1464,
+            "completion": 179,
+            "exact": false,
+            "cny": 0.00436
+          },
+          {
+            "who": 1,
+            "round": 3,
+            "prompt": 1572,
+            "completion": 179,
+            "exact": false,
+            "cny": 0.004576
+          },
+          {
+            "who": 1,
+            "round": 4,
+            "prompt": 1677,
+            "completion": 179,
+            "exact": false,
+            "cny": 0.004786
+          },
+          {
+            "who": 1,
+            "round": 5,
+            "prompt": 1788,
+            "completion": 179,
+            "exact": false,
+            "cny": 0.005008
+          },
+          {
+            "who": 1,
+            "round": 6,
+            "prompt": 1901,
+            "completion": 179,
+            "exact": false,
+            "cny": 0.005234
+          },
+          {
+            "who": 1,
+            "round": 7,
+            "prompt": 2143,
+            "completion": 179,
+            "exact": true,
+            "cny": 0.005718
+          },
+          {
+            "who": 2,
+            "round": 1,
+            "prompt": 1335,
+            "completion": 179,
+            "exact": false,
+            "cny": 0.004102
+          },
+          {
+            "who": 2,
+            "round": 2,
+            "prompt": 1456,
+            "completion": 179,
+            "exact": false,
+            "cny": 0.004344
+          },
+          {
+            "who": 2,
+            "round": 3,
+            "prompt": 1564,
+            "completion": 179,
+            "exact": false,
+            "cny": 0.00456
+          },
+          {
+            "who": 2,
+            "round": 4,
+            "prompt": 1669,
+            "completion": 179,
+            "exact": false,
+            "cny": 0.00477
+          },
+          {
+            "who": 2,
+            "round": 5,
+            "prompt": 1780,
+            "completion": 179,
+            "exact": false,
+            "cny": 0.004992
+          },
+          {
+            "who": 2,
+            "round": 6,
+            "prompt": 1893,
+            "completion": 179,
+            "exact": false,
+            "cny": 0.0052179999999999995
+          },
+          {
+            "who": 2,
+            "round": 7,
+            "prompt": 2135,
+            "completion": 179,
+            "exact": true,
+            "cny": 0.0057020000000000005
+          },
+          {
+            "who": 3,
+            "round": 1,
+            "prompt": 1336,
+            "completion": 179,
+            "exact": false,
+            "cny": 0.004104
+          },
+          {
+            "who": 3,
+            "round": 2,
+            "prompt": 1457,
+            "completion": 179,
+            "exact": false,
+            "cny": 0.004346
+          },
+          {
+            "who": 3,
+            "round": 3,
+            "prompt": 1565,
+            "completion": 179,
+            "exact": false,
+            "cny": 0.004562
+          },
+          {
+            "who": 3,
+            "round": 4,
+            "prompt": 1670,
+            "completion": 179,
+            "exact": false,
+            "cny": 0.004772
+          },
+          {
+            "who": 3,
+            "round": 5,
+            "prompt": 1781,
+            "completion": 179,
+            "exact": false,
+            "cny": 0.004994
+          },
+          {
+            "who": 3,
+            "round": 6,
+            "prompt": 1894,
+            "completion": 179,
+            "exact": false,
+            "cny": 0.00522
+          },
+          {
+            "who": 3,
+            "round": 7,
+            "prompt": 2136,
+            "completion": 179,
+            "exact": true,
+            "cny": 0.005704
+          },
+          {
+            "who": 4,
+            "round": 1,
+            "prompt": 1344,
+            "completion": 179,
+            "exact": false,
+            "cny": 0.0041199999999999995
+          },
+          {
+            "who": 4,
+            "round": 2,
+            "prompt": 1465,
+            "completion": 179,
+            "exact": false,
+            "cny": 0.0043619999999999996
+          },
+          {
+            "who": 4,
+            "round": 3,
+            "prompt": 1573,
+            "completion": 179,
+            "exact": false,
+            "cny": 0.004578
+          },
+          {
+            "who": 4,
+            "round": 4,
+            "prompt": 1678,
+            "completion": 179,
+            "exact": false,
+            "cny": 0.004788
+          },
+          {
+            "who": 4,
+            "round": 5,
+            "prompt": 1789,
+            "completion": 179,
+            "exact": false,
+            "cny": 0.00501
+          },
+          {
+            "who": 4,
+            "round": 6,
+            "prompt": 1902,
+            "completion": 179,
+            "exact": false,
+            "cny": 0.005236
+          },
+          {
+            "who": 4,
+            "round": 7,
+            "prompt": 2144,
+            "completion": 179,
+            "exact": true,
+            "cny": 0.00572
+          },
+          {
+            "who": 5,
+            "round": 1,
+            "prompt": 1344,
+            "completion": 179,
+            "exact": false,
+            "cny": 0.0041199999999999995
+          },
+          {
+            "who": 5,
+            "round": 2,
+            "prompt": 1465,
+            "completion": 179,
+            "exact": false,
+            "cny": 0.0043619999999999996
+          },
+          {
+            "who": 5,
+            "round": 3,
+            "prompt": 1573,
+            "completion": 179,
+            "exact": false,
+            "cny": 0.004578
+          },
+          {
+            "who": 5,
+            "round": 4,
+            "prompt": 1678,
+            "completion": 179,
+            "exact": false,
+            "cny": 0.004788
+          },
+          {
+            "who": 5,
+            "round": 5,
+            "prompt": 1789,
+            "completion": 179,
+            "exact": false,
+            "cny": 0.00501
+          },
+          {
+            "who": 5,
+            "round": 6,
+            "prompt": 1902,
+            "completion": 179,
+            "exact": false,
+            "cny": 0.005236
+          },
+          {
+            "who": 5,
+            "round": 7,
+            "prompt": 2144,
+            "completion": 179,
+            "exact": true,
+            "cny": 0.00572
+          }
+        ],
+        "totalPrompt": 71279,
+        "totalCompletion": 7518,
+        "totalCny": 0.20270199999999994,
+        "peak": true,
+        "ratio": 0.6541291905151267,
+        "turnOutput": 179,
+        "measureCalls": 8,
+        "measureCny": 0.0435,
+        "measureDetail": [
+          {
+            "label": "session-speeches",
+            "prompt": 202,
+            "completion": 1274,
+            "ms": 185,
+            "peak": true,
+            "ok": true,
+            "error": ""
+          },
+          {
+            "label": "turn-r7-0",
+            "prompt": 2149,
+            "completion": 179,
+            "ms": 155,
+            "peak": true,
+            "ok": true,
+            "error": ""
+          },
+          {
+            "label": "turn-r7-1",
+            "prompt": 2143,
+            "completion": 64,
+            "ms": 268,
+            "peak": true,
+            "ok": true,
+            "error": ""
+          },
+          {
+            "label": "turn-r7-2",
+            "prompt": 2135,
+            "completion": 64,
+            "ms": 176,
+            "peak": true,
+            "ok": true,
+            "error": ""
+          },
+          {
+            "label": "turn-r7-3",
+            "prompt": 2136,
+            "completion": 64,
+            "ms": 213,
+            "peak": true,
+            "ok": true,
+            "error": ""
+          },
+          {
+            "label": "turn-r7-4",
+            "prompt": 2144,
+            "completion": 64,
+            "ms": 197,
+            "peak": true,
+            "ok": true,
+            "error": ""
+          },
+          {
+            "label": "turn-r7-5",
+            "prompt": 2144,
+            "completion": 64,
+            "ms": 359,
+            "peak": true,
+            "ok": true,
+            "error": ""
+          },
+          {
+            "label": "turn-r1-0",
+            "prompt": 1349,
+            "completion": 64,
+            "ms": 759,
+            "peak": true,
+            "ok": true,
+            "error": ""
+          }
+        ],
+        "notes": [],
+        "method": "第 7 轮 6 人 prompt 全部实测;第 1 轮实测 1 人;中间轮次 = 实测第 7 轮减去尾部发言实测比例;输出取实测回合决策长度"
+      },
+      "motif": {
+        "declared": {
+          "恐惧": 1,
+          "情感纠葛": 2,
+          "身份败露": 1,
+          "灭口": 1,
+          "保命": 1
+        },
+        "inferred": {
+          "恐惧": 1,
+          "欠债被逼": 1,
+          "夺产": 1
+        },
+        "unknown": 3
+      }
+    },
+    {
+      "id": "case-02-未来空间站",
+      "theme": "未来空间站",
+      "difficulty": "medium",
+      "seed": 2202,
+      "killer": 0,
+      "slots": [
+        "19:00",
+        "19:40",
+        "20:25",
+        "21:10",
+        "21:55"
+      ],
+      "murderSlot": 3,
+      "title": "静默窗口的供氧阀",
+      "ok": true,
+      "failedChecks": [],
+      "checkMatrix": [
+        {
+          "id": "schema",
+          "name": "结构完整性(前置)",
+          "ok": true,
+          "nFailed": 0
+        },
+        {
+          "id": "timeline",
+          "name": "时间线自洽",
+          "ok": true,
+          "nFailed": 0
+        },
+        {
+          "id": "clues",
+          "name": "线索有效性",
+          "ok": true,
+          "nFailed": 0
+        },
+        {
+          "id": "solvable",
+          "name": "凶手可推导",
+          "ok": true,
+          "nFailed": 0
+        },
+        {
+          "id": "secret",
+          "name": "秘密与身份一致",
+          "ok": true,
+          "nFailed": 0
+        },
+        {
+          "id": "spoiler",
+          "name": "无泄底",
+          "ok": true,
+          "nFailed": 0
+        },
+        {
+          "id": "motif",
+          "name": "套路化检测",
+          "ok": true,
+          "nFailed": 0
+        }
+      ],
+      "warningCount": 11,
+      "warnings": [
+        "[时间线自洽] 时间线1(19:00)提到了「蔡铭」,但他不在 present/witnesses 里",
+        "[时间线自洽] 时间线1(19:00)提到了「阮棠」,但他不在 present/witnesses 里",
+        "[时间线自洽] 时间线9(21:55)提到了「洛弦」,但他不在 present/witnesses 里",
+        "[时间线自洽] 时间线10(21:55)提到了「蔡铭」,但他不在 present/witnesses 里",
+        "[线索有效性] 线索C4 写到了「阮棠」但 pointsTo 不含他 —— 可能是漏标",
+        "[线索有效性] 线索C5 写到了「黄述」但 pointsTo 不含他 —— 可能是漏标",
+        "[线索有效性] 线索C8 写到了「黄述」但 pointsTo 不含他 —— 可能是漏标",
+        "[套路化检测] 3 个人的动机文本反推不出类型,「动机多样性」这一项的说服力有限",
+        "[套路化检测] 角色1 标的 motiveType「情感纠葛」在动机文本里找不到任何对应关键词,标签与动机可能不符",
+        "[套路化检测] 角色3 标的 motiveType「保命」在动机文本里找不到任何对应关键词,标签与动机可能不符",
+        "[套路化检测] 角色5 标的 motiveType「复仇」在动机文本里找不到任何对应关键词,标签与动机可能不符"
+      ],
+      "repairRounds": 0,
+      "cost": {
+        "calls": 4,
+        "promptTokens": 4356,
+        "completionTokens": 2970,
+        "reasoningTokens": 0,
+        "cny": 0.032472,
+        "elapsedSec": 33.8,
+        "perCall": [
+          {
+            "pass": "characters",
+            "prompt": 1110,
+            "completion": 1155,
+            "reasoning": 0,
+            "peak": true,
+            "ms": 164,
+            "cny": 0.01146
+          },
+          {
+            "pass": "timeline",
+            "prompt": 762,
+            "completion": 875,
+            "reasoning": 0,
+            "peak": true,
+            "ms": 143,
+            "cny": 0.008524
+          },
+          {
+            "pass": "clues",
+            "prompt": 1218,
+            "completion": 605,
+            "reasoning": 0,
+            "peak": true,
+            "ms": 161,
+            "cny": 0.007276
+          },
+          {
+            "pass": "solution",
+            "prompt": 1266,
+            "completion": 335,
+            "reasoning": 0,
+            "peak": true,
+            "ms": 259,
+            "cny": 0.005212
+          }
+        ]
+      },
+      "size": {
+        "premiseChars": 147,
+        "bioChars": 597,
+        "secretChars": 203,
+        "timelineChars": 493,
+        "clueChars": 444,
+        "solutionChars": 426,
+        "clueCount": 8,
+        "timelineCount": 12
+      },
+      "session": {
+        "rounds": 7,
+        "characters": 6,
+        "calls": 42,
+        "perCall": [
+          {
+            "who": 0,
+            "round": 1,
+            "prompt": 1309,
+            "completion": 212,
+            "exact": true,
+            "cny": 0.004314
+          },
+          {
+            "who": 0,
+            "round": 2,
+            "prompt": 1408,
+            "completion": 212,
+            "exact": false,
+            "cny": 0.004512
+          },
+          {
+            "who": 0,
+            "round": 3,
+            "prompt": 1489,
+            "completion": 212,
+            "exact": false,
+            "cny": 0.004674
+          },
+          {
+            "who": 0,
+            "round": 4,
+            "prompt": 1566,
+            "completion": 212,
+            "exact": false,
+            "cny": 0.004828
+          },
+          {
+            "who": 0,
+            "round": 5,
+            "prompt": 1666,
+            "completion": 212,
+            "exact": false,
+            "cny": 0.0050279999999999995
+          },
+          {
+            "who": 0,
+            "round": 6,
+            "prompt": 1751,
+            "completion": 212,
+            "exact": false,
+            "cny": 0.0051979999999999995
+          },
+          {
+            "who": 0,
+            "round": 7,
+            "prompt": 1931,
+            "completion": 212,
+            "exact": true,
+            "cny": 0.0055580000000000004
+          },
+          {
+            "who": 1,
+            "round": 1,
+            "prompt": 1323,
+            "completion": 212,
+            "exact": false,
+            "cny": 0.004342
+          },
+          {
+            "who": 1,
+            "round": 2,
+            "prompt": 1422,
+            "completion": 212,
+            "exact": false,
+            "cny": 0.004540000000000001
+          },
+          {
+            "who": 1,
+            "round": 3,
+            "prompt": 1503,
+            "completion": 212,
+            "exact": false,
+            "cny": 0.004702
+          },
+          {
+            "who": 1,
+            "round": 4,
+            "prompt": 1580,
+            "completion": 212,
+            "exact": false,
+            "cny": 0.004856
+          },
+          {
+            "who": 1,
+            "round": 5,
+            "prompt": 1680,
+            "completion": 212,
+            "exact": false,
+            "cny": 0.005056
+          },
+          {
+            "who": 1,
+            "round": 6,
+            "prompt": 1765,
+            "completion": 212,
+            "exact": false,
+            "cny": 0.005226
+          },
+          {
+            "who": 1,
+            "round": 7,
+            "prompt": 1945,
+            "completion": 212,
+            "exact": true,
+            "cny": 0.005586
+          },
+          {
+            "who": 2,
+            "round": 1,
+            "prompt": 1313,
+            "completion": 212,
+            "exact": false,
+            "cny": 0.0043219999999999995
+          },
+          {
+            "who": 2,
+            "round": 2,
+            "prompt": 1412,
+            "completion": 212,
+            "exact": false,
+            "cny": 0.00452
+          },
+          {
+            "who": 2,
+            "round": 3,
+            "prompt": 1493,
+            "completion": 212,
+            "exact": false,
+            "cny": 0.004682
+          },
+          {
+            "who": 2,
+            "round": 4,
+            "prompt": 1570,
+            "completion": 212,
+            "exact": false,
+            "cny": 0.004836
+          },
+          {
+            "who": 2,
+            "round": 5,
+            "prompt": 1670,
+            "completion": 212,
+            "exact": false,
+            "cny": 0.0050360000000000005
+          },
+          {
+            "who": 2,
+            "round": 6,
+            "prompt": 1755,
+            "completion": 212,
+            "exact": false,
+            "cny": 0.0052060000000000006
+          },
+          {
+            "who": 2,
+            "round": 7,
+            "prompt": 1935,
+            "completion": 212,
+            "exact": true,
+            "cny": 0.005566
+          },
+          {
+            "who": 3,
+            "round": 1,
+            "prompt": 1309,
+            "completion": 212,
+            "exact": false,
+            "cny": 0.004314
+          },
+          {
+            "who": 3,
+            "round": 2,
+            "prompt": 1408,
+            "completion": 212,
+            "exact": false,
+            "cny": 0.004512
+          },
+          {
+            "who": 3,
+            "round": 3,
+            "prompt": 1489,
+            "completion": 212,
+            "exact": false,
+            "cny": 0.004674
+          },
+          {
+            "who": 3,
+            "round": 4,
+            "prompt": 1566,
+            "completion": 212,
+            "exact": false,
+            "cny": 0.004828
+          },
+          {
+            "who": 3,
+            "round": 5,
+            "prompt": 1666,
+            "completion": 212,
+            "exact": false,
+            "cny": 0.0050279999999999995
+          },
+          {
+            "who": 3,
+            "round": 6,
+            "prompt": 1751,
+            "completion": 212,
+            "exact": false,
+            "cny": 0.0051979999999999995
+          },
+          {
+            "who": 3,
+            "round": 7,
+            "prompt": 1931,
+            "completion": 212,
+            "exact": true,
+            "cny": 0.0055580000000000004
+          },
+          {
+            "who": 4,
+            "round": 1,
+            "prompt": 1302,
+            "completion": 212,
+            "exact": false,
+            "cny": 0.0043
+          },
+          {
+            "who": 4,
+            "round": 2,
+            "prompt": 1401,
+            "completion": 212,
+            "exact": false,
+            "cny": 0.004498
+          },
+          {
+            "who": 4,
+            "round": 3,
+            "prompt": 1482,
+            "completion": 212,
+            "exact": false,
+            "cny": 0.00466
+          },
+          {
+            "who": 4,
+            "round": 4,
+            "prompt": 1559,
+            "completion": 212,
+            "exact": false,
+            "cny": 0.004814000000000001
+          },
+          {
+            "who": 4,
+            "round": 5,
+            "prompt": 1659,
+            "completion": 212,
+            "exact": false,
+            "cny": 0.005014
+          },
+          {
+            "who": 4,
+            "round": 6,
+            "prompt": 1744,
+            "completion": 212,
+            "exact": false,
+            "cny": 0.005184
+          },
+          {
+            "who": 4,
+            "round": 7,
+            "prompt": 1924,
+            "completion": 212,
+            "exact": true,
+            "cny": 0.005544
+          },
+          {
+            "who": 5,
+            "round": 1,
+            "prompt": 1310,
+            "completion": 212,
+            "exact": false,
+            "cny": 0.004316
+          },
+          {
+            "who": 5,
+            "round": 2,
+            "prompt": 1409,
+            "completion": 212,
+            "exact": false,
+            "cny": 0.004514000000000001
+          },
+          {
+            "who": 5,
+            "round": 3,
+            "prompt": 1490,
+            "completion": 212,
+            "exact": false,
+            "cny": 0.004676
+          },
+          {
+            "who": 5,
+            "round": 4,
+            "prompt": 1567,
+            "completion": 212,
+            "exact": false,
+            "cny": 0.00483
+          },
+          {
+            "who": 5,
+            "round": 5,
+            "prompt": 1667,
+            "completion": 212,
+            "exact": false,
+            "cny": 0.00503
+          },
+          {
+            "who": 5,
+            "round": 6,
+            "prompt": 1752,
+            "completion": 212,
+            "exact": false,
+            "cny": 0.0052
+          },
+          {
+            "who": 5,
+            "round": 7,
+            "prompt": 1932,
+            "completion": 212,
+            "exact": true,
+            "cny": 0.00556
+          }
+        ],
+        "totalPrompt": 66804,
+        "totalCompletion": 8904,
+        "totalCny": 0.20484000000000002,
+        "peak": true,
+        "ratio": 0.6418988648090815,
+        "turnOutput": 212,
+        "measureCalls": 8,
+        "measureCny": 0.039714,
+        "measureDetail": [
+          {
+            "label": "session-speeches",
+            "prompt": 198,
+            "completion": 1092,
+            "ms": 115,
+            "peak": true,
+            "ok": true,
+            "error": ""
+          },
+          {
+            "label": "turn-r7-0",
+            "prompt": 1931,
+            "completion": 212,
+            "ms": 150,
+            "peak": true,
+            "ok": true,
+            "error": ""
+          },
+          {
+            "label": "turn-r7-1",
+            "prompt": 1945,
+            "completion": 64,
+            "ms": 167,
+            "peak": true,
+            "ok": true,
+            "error": ""
+          },
+          {
+            "label": "turn-r7-2",
+            "prompt": 1935,
+            "completion": 64,
+            "ms": 146,
+            "peak": true,
+            "ok": true,
+            "error": ""
+          },
+          {
+            "label": "turn-r7-3",
+            "prompt": 1931,
+            "completion": 64,
+            "ms": 168,
+            "peak": true,
+            "ok": true,
+            "error": ""
+          },
+          {
+            "label": "turn-r7-4",
+            "prompt": 1924,
+            "completion": 64,
+            "ms": 266,
+            "peak": true,
+            "ok": true,
+            "error": ""
+          },
+          {
+            "label": "turn-r7-5",
+            "prompt": 1932,
+            "completion": 64,
+            "ms": 424,
+            "peak": true,
+            "ok": true,
+            "error": ""
+          },
+          {
+            "label": "turn-r1-0",
+            "prompt": 1309,
+            "completion": 64,
+            "ms": 147,
+            "peak": true,
+            "ok": true,
+            "error": ""
+          }
+        ],
+        "notes": [],
+        "method": "第 7 轮 6 人 prompt 全部实测;第 1 轮实测 1 人;中间轮次 = 实测第 7 轮减去尾部发言实测比例;输出取实测回合决策长度"
+      },
+      "motif": {
+        "declared": {
+          "情感纠葛": 1,
+          "欠债被逼": 2,
+          "保命": 1,
+          "复仇": 1,
+          "恐惧": 1
+        },
+        "inferred": {
+          "欠债被逼": 2,
+          "恐惧": 1
+        },
+        "unknown": 3
+      }
+    },
+    {
+      "id": "case-03-雪夜山宿",
+      "theme": "雪夜山宿",
+      "difficulty": "easy",
+      "seed": 3303,
+      "killer": 3,
+      "slots": [
+        "19:30",
+        "20:05",
+        "20:40",
+        "21:25"
+      ],
+      "murderSlot": 2,
+      "title": "柴房外的雪印",
+      "ok": true,
+      "failedChecks": [],
+      "checkMatrix": [
+        {
+          "id": "schema",
+          "name": "结构完整性(前置)",
+          "ok": true,
+          "nFailed": 0
+        },
+        {
+          "id": "timeline",
+          "name": "时间线自洽",
+          "ok": true,
+          "nFailed": 0
+        },
+        {
+          "id": "clues",
+          "name": "线索有效性",
+          "ok": true,
+          "nFailed": 0
+        },
+        {
+          "id": "solvable",
+          "name": "凶手可推导",
+          "ok": true,
+          "nFailed": 0
+        },
+        {
+          "id": "secret",
+          "name": "秘密与身份一致",
+          "ok": true,
+          "nFailed": 0
+        },
+        {
+          "id": "spoiler",
+          "name": "无泄底",
+          "ok": true,
+          "nFailed": 0
+        },
+        {
+          "id": "motif",
+          "name": "套路化检测",
+          "ok": true,
+          "nFailed": 0
+        }
+      ],
+      "warningCount": 11,
+      "warnings": [
+        "[时间线自洽] 时间线10(21:25)提到了「刘建国」,但他不在 present/witnesses 里",
+        "[线索有效性] 线索C1 写到了「孙德福」但 pointsTo 不含他 —— 可能是漏标",
+        "[线索有效性] 线索C2 写到了「宋老蔫」但 pointsTo 不含他 —— 可能是漏标",
+        "[线索有效性] 线索C3 写到了「周雪梅」但 pointsTo 不含他 —— 可能是漏标",
+        "[线索有效性] 线索C4 写到了「赵长顺的二外甥女」但 pointsTo 不含他 —— 可能是漏标",
+        "[线索有效性] 线索C6 写到了「孙德福」但 pointsTo 不含他 —— 可能是漏标",
+        "[套路化检测] 角色1 标的 motiveType「身份败露」在动机文本里找不到任何对应关键词,标签与动机可能不符",
+        "[套路化检测] 角色2 标的 motiveType「保命」与动机文本更像「夺产」",
+        "[套路化检测] 角色3 标的 motiveType「身份败露」与动机文本更像「灭口」",
+        "[套路化检测] 角色4 标的 motiveType「灭口」与动机文本更像「夺产」",
+        "[套路化检测] 角色5 标的 motiveType「复仇」在动机文本里找不到任何对应关键词,标签与动机可能不符"
+      ],
+      "repairRounds": 0,
+      "cost": {
+        "calls": 4,
+        "promptTokens": 4429,
+        "completionTokens": 2802,
+        "reasoningTokens": 0,
+        "cny": 0.031274,
+        "elapsedSec": 35.4,
+        "perCall": [
+          {
+            "pass": "characters",
+            "prompt": 1104,
+            "completion": 1030,
+            "reasoning": 0,
+            "peak": true,
+            "ms": 108,
+            "cny": 0.010448
+          },
+          {
+            "pass": "timeline",
+            "prompt": 761,
+            "completion": 939,
+            "reasoning": 0,
+            "peak": true,
+            "ms": 151,
+            "cny": 0.009034
+          },
+          {
+            "pass": "clues",
+            "prompt": 1249,
+            "completion": 455,
+            "reasoning": 0,
+            "peak": true,
+            "ms": 353,
+            "cny": 0.006138
+          },
+          {
+            "pass": "solution",
+            "prompt": 1315,
+            "completion": 378,
+            "reasoning": 0,
+            "peak": true,
+            "ms": 195,
+            "cny": 0.005654
+          }
+        ]
+      },
+      "size": {
+        "premiseChars": 167,
+        "bioChars": 485,
+        "secretChars": 208,
+        "timelineChars": 525,
+        "clueChars": 374,
+        "solutionChars": 436,
+        "clueCount": 7,
+        "timelineCount": 12
+      },
+      "session": {
+        "rounds": 7,
+        "characters": 6,
+        "calls": 42,
+        "perCall": [
+          {
+            "who": 0,
+            "round": 1,
+            "prompt": 1418,
+            "completion": 197,
+            "exact": true,
+            "cny": 0.004412
+          },
+          {
+            "who": 0,
+            "round": 2,
+            "prompt": 1547,
+            "completion": 197,
+            "exact": false,
+            "cny": 0.00467
+          },
+          {
+            "who": 0,
+            "round": 3,
+            "prompt": 1667,
+            "completion": 197,
+            "exact": false,
+            "cny": 0.00491
+          },
+          {
+            "who": 0,
+            "round": 4,
+            "prompt": 1797,
+            "completion": 197,
+            "exact": false,
+            "cny": 0.00517
+          },
+          {
+            "who": 0,
+            "round": 5,
+            "prompt": 1923,
+            "completion": 197,
+            "exact": false,
+            "cny": 0.005422
+          },
+          {
+            "who": 0,
+            "round": 6,
+            "prompt": 2059,
+            "completion": 197,
+            "exact": false,
+            "cny": 0.005694
+          },
+          {
+            "who": 0,
+            "round": 7,
+            "prompt": 2329,
+            "completion": 197,
+            "exact": true,
+            "cny": 0.006234
+          },
+          {
+            "who": 1,
+            "round": 1,
+            "prompt": 1417,
+            "completion": 197,
+            "exact": false,
+            "cny": 0.00441
+          },
+          {
+            "who": 1,
+            "round": 2,
+            "prompt": 1546,
+            "completion": 197,
+            "exact": false,
+            "cny": 0.004668
+          },
+          {
+            "who": 1,
+            "round": 3,
+            "prompt": 1666,
+            "completion": 197,
+            "exact": false,
+            "cny": 0.004908
+          },
+          {
+            "who": 1,
+            "round": 4,
+            "prompt": 1796,
+            "completion": 197,
+            "exact": false,
+            "cny": 0.005168
+          },
+          {
+            "who": 1,
+            "round": 5,
+            "prompt": 1922,
+            "completion": 197,
+            "exact": false,
+            "cny": 0.00542
+          },
+          {
+            "who": 1,
+            "round": 6,
+            "prompt": 2058,
+            "completion": 197,
+            "exact": false,
+            "cny": 0.005692
+          },
+          {
+            "who": 1,
+            "round": 7,
+            "prompt": 2328,
+            "completion": 197,
+            "exact": true,
+            "cny": 0.0062320000000000006
+          },
+          {
+            "who": 2,
+            "round": 1,
+            "prompt": 1396,
+            "completion": 197,
+            "exact": false,
+            "cny": 0.004368
+          },
+          {
+            "who": 2,
+            "round": 2,
+            "prompt": 1525,
+            "completion": 197,
+            "exact": false,
+            "cny": 0.004626
+          },
+          {
+            "who": 2,
+            "round": 3,
+            "prompt": 1645,
+            "completion": 197,
+            "exact": false,
+            "cny": 0.004866
+          },
+          {
+            "who": 2,
+            "round": 4,
+            "prompt": 1775,
+            "completion": 197,
+            "exact": false,
+            "cny": 0.005126
+          },
+          {
+            "who": 2,
+            "round": 5,
+            "prompt": 1901,
+            "completion": 197,
+            "exact": false,
+            "cny": 0.005378
+          },
+          {
+            "who": 2,
+            "round": 6,
+            "prompt": 2037,
+            "completion": 197,
+            "exact": false,
+            "cny": 0.0056500000000000005
+          },
+          {
+            "who": 2,
+            "round": 7,
+            "prompt": 2307,
+            "completion": 197,
+            "exact": true,
+            "cny": 0.00619
+          },
+          {
+            "who": 3,
+            "round": 1,
+            "prompt": 1413,
+            "completion": 197,
+            "exact": false,
+            "cny": 0.004402
+          },
+          {
+            "who": 3,
+            "round": 2,
+            "prompt": 1542,
+            "completion": 197,
+            "exact": false,
+            "cny": 0.00466
+          },
+          {
+            "who": 3,
+            "round": 3,
+            "prompt": 1662,
+            "completion": 197,
+            "exact": false,
+            "cny": 0.0049
+          },
+          {
+            "who": 3,
+            "round": 4,
+            "prompt": 1792,
+            "completion": 197,
+            "exact": false,
+            "cny": 0.00516
+          },
+          {
+            "who": 3,
+            "round": 5,
+            "prompt": 1918,
+            "completion": 197,
+            "exact": false,
+            "cny": 0.005412
+          },
+          {
+            "who": 3,
+            "round": 6,
+            "prompt": 2054,
+            "completion": 197,
+            "exact": false,
+            "cny": 0.005684
+          },
+          {
+            "who": 3,
+            "round": 7,
+            "prompt": 2324,
+            "completion": 197,
+            "exact": true,
+            "cny": 0.006224
+          },
+          {
+            "who": 4,
+            "round": 1,
+            "prompt": 1389,
+            "completion": 197,
+            "exact": false,
+            "cny": 0.004354
+          },
+          {
+            "who": 4,
+            "round": 2,
+            "prompt": 1518,
+            "completion": 197,
+            "exact": false,
+            "cny": 0.004612
+          },
+          {
+            "who": 4,
+            "round": 3,
+            "prompt": 1638,
+            "completion": 197,
+            "exact": false,
+            "cny": 0.0048519999999999995
+          },
+          {
+            "who": 4,
+            "round": 4,
+            "prompt": 1768,
+            "completion": 197,
+            "exact": false,
+            "cny": 0.005112
+          },
+          {
+            "who": 4,
+            "round": 5,
+            "prompt": 1894,
+            "completion": 197,
+            "exact": false,
+            "cny": 0.005364
+          },
+          {
+            "who": 4,
+            "round": 6,
+            "prompt": 2030,
+            "completion": 197,
+            "exact": false,
+            "cny": 0.005636
+          },
+          {
+            "who": 4,
+            "round": 7,
+            "prompt": 2300,
+            "completion": 197,
+            "exact": true,
+            "cny": 0.006176
+          },
+          {
+            "who": 5,
+            "round": 1,
+            "prompt": 1408,
+            "completion": 197,
+            "exact": false,
+            "cny": 0.004392
+          },
+          {
+            "who": 5,
+            "round": 2,
+            "prompt": 1537,
+            "completion": 197,
+            "exact": false,
+            "cny": 0.00465
+          },
+          {
+            "who": 5,
+            "round": 3,
+            "prompt": 1657,
+            "completion": 197,
+            "exact": false,
+            "cny": 0.00489
+          },
+          {
+            "who": 5,
+            "round": 4,
+            "prompt": 1787,
+            "completion": 197,
+            "exact": false,
+            "cny": 0.00515
+          },
+          {
+            "who": 5,
+            "round": 5,
+            "prompt": 1913,
+            "completion": 197,
+            "exact": false,
+            "cny": 0.005402
+          },
+          {
+            "who": 5,
+            "round": 6,
+            "prompt": 2049,
+            "completion": 197,
+            "exact": false,
+            "cny": 0.005674
+          },
+          {
+            "who": 5,
+            "round": 7,
+            "prompt": 2319,
+            "completion": 197,
+            "exact": true,
+            "cny": 0.006214
+          }
+        ],
+        "totalPrompt": 75971,
+        "totalCompletion": 8274,
+        "totalCny": 0.218134,
+        "peak": true,
+        "ratio": 0.7089494163424125,
+        "turnOutput": 197,
+        "measureCalls": 8,
+        "measureCny": 0.046551999999999996,
+        "measureDetail": [
+          {
+            "label": "session-speeches",
+            "prompt": 207,
+            "completion": 1355,
+            "ms": 151,
+            "peak": true,
+            "ok": true,
+            "error": ""
+          },
+          {
+            "label": "turn-r7-0",
+            "prompt": 2329,
+            "completion": 197,
+            "ms": 155,
+            "peak": true,
+            "ok": true,
+            "error": ""
+          },
+          {
+            "label": "turn-r7-1",
+            "prompt": 2328,
+            "completion": 64,
+            "ms": 127,
+            "peak": true,
+            "ok": true,
+            "error": ""
+          },
+          {
+            "label": "turn-r7-2",
+            "prompt": 2307,
+            "completion": 64,
+            "ms": 134,
+            "peak": true,
+            "ok": true,
+            "error": ""
+          },
+          {
+            "label": "turn-r7-3",
+            "prompt": 2324,
+            "completion": 64,
+            "ms": 112,
+            "peak": true,
+            "ok": true,
+            "error": ""
+          },
+          {
+            "label": "turn-r7-4",
+            "prompt": 2300,
+            "completion": 64,
+            "ms": 133,
+            "peak": true,
+            "ok": true,
+            "error": ""
+          },
+          {
+            "label": "turn-r7-5",
+            "prompt": 2319,
+            "completion": 64,
+            "ms": 137,
+            "peak": true,
+            "ok": true,
+            "error": ""
+          },
+          {
+            "label": "turn-r1-0",
+            "prompt": 1418,
+            "completion": 64,
+            "ms": 124,
+            "peak": true,
+            "ok": true,
+            "error": ""
+          }
+        ],
+        "notes": [],
+        "method": "第 7 轮 6 人 prompt 全部实测;第 1 轮实测 1 人;中间轮次 = 实测第 7 轮减去尾部发言实测比例;输出取实测回合决策长度"
+      },
+      "motif": {
+        "declared": {
+          "身份败露": 2,
+          "保命": 1,
+          "灭口": 1,
+          "复仇": 1,
+          "夺产": 1
+        },
+        "inferred": {
+          "夺产": 3,
+          "灭口": 1
+        },
+        "unknown": 2
+      }
+    },
+    {
+      "id": "case-04-远洋邮轮",
+      "theme": "远洋邮轮",
+      "difficulty": "hard",
+      "seed": 4404,
+      "killer": 2,
+      "slots": [
+        "19:00",
+        "19:35",
+        "20:20",
+        "20:55",
+        "21:30"
+      ],
+      "murderSlot": 3,
+      "title": "雾锁远望·牌局索命",
+      "ok": true,
+      "failedChecks": [],
+      "checkMatrix": [
+        {
+          "id": "schema",
+          "name": "结构完整性(前置)",
+          "ok": true,
+          "nFailed": 0
+        },
+        {
+          "id": "timeline",
+          "name": "时间线自洽",
+          "ok": true,
+          "nFailed": 0
+        },
+        {
+          "id": "clues",
+          "name": "线索有效性",
+          "ok": true,
+          "nFailed": 0
+        },
+        {
+          "id": "solvable",
+          "name": "凶手可推导",
+          "ok": true,
+          "nFailed": 0
+        },
+        {
+          "id": "secret",
+          "name": "秘密与身份一致",
+          "ok": true,
+          "nFailed": 0
+        },
+        {
+          "id": "spoiler",
+          "name": "无泄底",
+          "ok": true,
+          "nFailed": 0
+        },
+        {
+          "id": "motif",
+          "name": "套路化检测",
+          "ok": true,
+          "nFailed": 0
+        }
+      ],
+      "warningCount": 6,
+      "warnings": [
+        "[线索有效性] 线索C4 写到了「邝美珍」但 pointsTo 不含他 —— 可能是漏标",
+        "[线索有效性] 线索C5 写到了「老杜」但 pointsTo 不含他 —— 可能是漏标",
+        "[线索有效性] 线索C6 写到了「陆永贵」但 pointsTo 不含他 —— 可能是漏标",
+        "[套路化检测] 角色2 标的 motiveType「灭口」与动机文本更像「恐惧」",
+        "[套路化检测] 角色4 标的 motiveType「灭口」在动机文本里找不到任何对应关键词,标签与动机可能不符",
+        "[套路化检测] 角色5 标的 motiveType「复仇」与动机文本更像「欠债被逼」"
+      ],
+      "repairRounds": 0,
+      "cost": {
+        "calls": 4,
+        "promptTokens": 4476,
+        "completionTokens": 3298,
+        "reasoningTokens": 0,
+        "cny": 0.035336,
+        "elapsedSec": 37.1,
+        "perCall": [
+          {
+            "pass": "characters",
+            "prompt": 1110,
+            "completion": 1269,
+            "reasoning": 0,
+            "peak": true,
+            "ms": 119,
+            "cny": 0.012372
+          },
+          {
+            "pass": "timeline",
+            "prompt": 755,
+            "completion": 823,
+            "reasoning": 0,
+            "peak": true,
+            "ms": 147,
+            "cny": 0.008094
+          },
+          {
+            "pass": "clues",
+            "prompt": 1190,
+            "completion": 836,
+            "reasoning": 0,
+            "peak": true,
+            "ms": 96,
+            "cny": 0.009068
+          },
+          {
+            "pass": "solution",
+            "prompt": 1421,
+            "completion": 370,
+            "reasoning": 0,
+            "peak": true,
+            "ms": 177,
+            "cny": 0.005802
+          }
+        ]
+      },
+      "size": {
+        "premiseChars": 189,
+        "bioChars": 472,
+        "secretChars": 243,
+        "timelineChars": 492,
+        "clueChars": 608,
+        "solutionChars": 441,
+        "clueCount": 10,
+        "timelineCount": 11
+      },
+      "session": {
+        "rounds": 7,
+        "characters": 6,
+        "calls": 42,
+        "perCall": [
+          {
+            "who": 0,
+            "round": 1,
+            "prompt": 1461,
+            "completion": 186,
+            "exact": true,
+            "cny": 0.00441
+          },
+          {
+            "who": 0,
+            "round": 2,
+            "prompt": 1577,
+            "completion": 186,
+            "exact": false,
+            "cny": 0.004642
+          },
+          {
+            "who": 0,
+            "round": 3,
+            "prompt": 1703,
+            "completion": 186,
+            "exact": false,
+            "cny": 0.004894
+          },
+          {
+            "who": 0,
+            "round": 4,
+            "prompt": 1827,
+            "completion": 186,
+            "exact": false,
+            "cny": 0.005142
+          },
+          {
+            "who": 0,
+            "round": 5,
+            "prompt": 1949,
+            "completion": 186,
+            "exact": false,
+            "cny": 0.005386
+          },
+          {
+            "who": 0,
+            "round": 6,
+            "prompt": 2077,
+            "completion": 186,
+            "exact": false,
+            "cny": 0.0056419999999999994
+          },
+          {
+            "who": 0,
+            "round": 7,
+            "prompt": 2330,
+            "completion": 186,
+            "exact": true,
+            "cny": 0.006148
+          },
+          {
+            "who": 1,
+            "round": 1,
+            "prompt": 1468,
+            "completion": 186,
+            "exact": false,
+            "cny": 0.004424
+          },
+          {
+            "who": 1,
+            "round": 2,
+            "prompt": 1584,
+            "completion": 186,
+            "exact": false,
+            "cny": 0.0046559999999999995
+          },
+          {
+            "who": 1,
+            "round": 3,
+            "prompt": 1710,
+            "completion": 186,
+            "exact": false,
+            "cny": 0.004908
+          },
+          {
+            "who": 1,
+            "round": 4,
+            "prompt": 1834,
+            "completion": 186,
+            "exact": false,
+            "cny": 0.005156
+          },
+          {
+            "who": 1,
+            "round": 5,
+            "prompt": 1956,
+            "completion": 186,
+            "exact": false,
+            "cny": 0.005399999999999999
+          },
+          {
+            "who": 1,
+            "round": 6,
+            "prompt": 2084,
+            "completion": 186,
+            "exact": false,
+            "cny": 0.005656
+          },
+          {
+            "who": 1,
+            "round": 7,
+            "prompt": 2337,
+            "completion": 186,
+            "exact": true,
+            "cny": 0.006162
+          },
+          {
+            "who": 2,
+            "round": 1,
+            "prompt": 1470,
+            "completion": 186,
+            "exact": false,
+            "cny": 0.004428
+          },
+          {
+            "who": 2,
+            "round": 2,
+            "prompt": 1586,
+            "completion": 186,
+            "exact": false,
+            "cny": 0.00466
+          },
+          {
+            "who": 2,
+            "round": 3,
+            "prompt": 1712,
+            "completion": 186,
+            "exact": false,
+            "cny": 0.004912
+          },
+          {
+            "who": 2,
+            "round": 4,
+            "prompt": 1836,
+            "completion": 186,
+            "exact": false,
+            "cny": 0.00516
+          },
+          {
+            "who": 2,
+            "round": 5,
+            "prompt": 1958,
+            "completion": 186,
+            "exact": false,
+            "cny": 0.005404
+          },
+          {
+            "who": 2,
+            "round": 6,
+            "prompt": 2086,
+            "completion": 186,
+            "exact": false,
+            "cny": 0.00566
+          },
+          {
+            "who": 2,
+            "round": 7,
+            "prompt": 2339,
+            "completion": 186,
+            "exact": true,
+            "cny": 0.006166
+          },
+          {
+            "who": 3,
+            "round": 1,
+            "prompt": 1460,
+            "completion": 186,
+            "exact": false,
+            "cny": 0.004408
+          },
+          {
+            "who": 3,
+            "round": 2,
+            "prompt": 1576,
+            "completion": 186,
+            "exact": false,
+            "cny": 0.00464
+          },
+          {
+            "who": 3,
+            "round": 3,
+            "prompt": 1702,
+            "completion": 186,
+            "exact": false,
+            "cny": 0.004892
+          },
+          {
+            "who": 3,
+            "round": 4,
+            "prompt": 1826,
+            "completion": 186,
+            "exact": false,
+            "cny": 0.00514
+          },
+          {
+            "who": 3,
+            "round": 5,
+            "prompt": 1948,
+            "completion": 186,
+            "exact": false,
+            "cny": 0.005384
+          },
+          {
+            "who": 3,
+            "round": 6,
+            "prompt": 2076,
+            "completion": 186,
+            "exact": false,
+            "cny": 0.00564
+          },
+          {
+            "who": 3,
+            "round": 7,
+            "prompt": 2329,
+            "completion": 186,
+            "exact": true,
+            "cny": 0.0061459999999999996
+          },
+          {
+            "who": 4,
+            "round": 1,
+            "prompt": 1467,
+            "completion": 186,
+            "exact": false,
+            "cny": 0.004422
+          },
+          {
+            "who": 4,
+            "round": 2,
+            "prompt": 1583,
+            "completion": 186,
+            "exact": false,
+            "cny": 0.004654
+          },
+          {
+            "who": 4,
+            "round": 3,
+            "prompt": 1709,
+            "completion": 186,
+            "exact": false,
+            "cny": 0.004906
+          },
+          {
+            "who": 4,
+            "round": 4,
+            "prompt": 1833,
+            "completion": 186,
+            "exact": false,
+            "cny": 0.005154
+          },
+          {
+            "who": 4,
+            "round": 5,
+            "prompt": 1955,
+            "completion": 186,
+            "exact": false,
+            "cny": 0.005398
+          },
+          {
+            "who": 4,
+            "round": 6,
+            "prompt": 2083,
+            "completion": 186,
+            "exact": false,
+            "cny": 0.005654
+          },
+          {
+            "who": 4,
+            "round": 7,
+            "prompt": 2336,
+            "completion": 186,
+            "exact": true,
+            "cny": 0.00616
+          },
+          {
+            "who": 5,
+            "round": 1,
+            "prompt": 1476,
+            "completion": 186,
+            "exact": false,
+            "cny": 0.00444
+          },
+          {
+            "who": 5,
+            "round": 2,
+            "prompt": 1592,
+            "completion": 186,
+            "exact": false,
+            "cny": 0.004672
+          },
+          {
+            "who": 5,
+            "round": 3,
+            "prompt": 1718,
+            "completion": 186,
+            "exact": false,
+            "cny": 0.0049239999999999996
+          },
+          {
+            "who": 5,
+            "round": 4,
+            "prompt": 1842,
+            "completion": 186,
+            "exact": false,
+            "cny": 0.005172
+          },
+          {
+            "who": 5,
+            "round": 5,
+            "prompt": 1964,
+            "completion": 186,
+            "exact": false,
+            "cny": 0.005416
+          },
+          {
+            "who": 5,
+            "round": 6,
+            "prompt": 2092,
+            "completion": 186,
+            "exact": false,
+            "cny": 0.005672
+          },
+          {
+            "who": 5,
+            "round": 7,
+            "prompt": 2345,
+            "completion": 186,
+            "exact": true,
+            "cny": 0.0061779999999999995
+          }
+        ],
+        "totalPrompt": 77796,
+        "totalCompletion": 7812,
+        "totalCny": 0.21808800000000003,
+        "peak": true,
+        "ratio": 0.6963141025641025,
+        "turnOutput": 186,
+        "measureCalls": 8,
+        "measureCny": 0.046844,
+        "measureDetail": [
+          {
+            "label": "session-speeches",
+            "prompt": 201,
+            "completion": 1366,
+            "ms": 138,
+            "peak": true,
+            "ok": true,
+            "error": ""
+          },
+          {
+            "label": "turn-r7-0",
+            "prompt": 2330,
+            "completion": 186,
+            "ms": 138,
+            "peak": true,
+            "ok": true,
+            "error": ""
+          },
+          {
+            "label": "turn-r7-1",
+            "prompt": 2337,
+            "completion": 64,
+            "ms": 179,
+            "peak": true,
+            "ok": true,
+            "error": ""
+          },
+          {
+            "label": "turn-r7-2",
+            "prompt": 2339,
+            "completion": 64,
+            "ms": 129,
+            "peak": true,
+            "ok": true,
+            "error": ""
+          },
+          {
+            "label": "turn-r7-3",
+            "prompt": 2329,
+            "completion": 64,
+            "ms": 111,
+            "peak": true,
+            "ok": true,
+            "error": ""
+          },
+          {
+            "label": "turn-r7-4",
+            "prompt": 2336,
+            "completion": 64,
+            "ms": 124,
+            "peak": true,
+            "ok": true,
+            "error": ""
+          },
+          {
+            "label": "turn-r7-5",
+            "prompt": 2345,
+            "completion": 64,
+            "ms": 124,
+            "peak": true,
+            "ok": true,
+            "error": ""
+          },
+          {
+            "label": "turn-r1-0",
+            "prompt": 1461,
+            "completion": 64,
+            "ms": 129,
+            "peak": true,
+            "ok": true,
+            "error": ""
+          }
+        ],
+        "notes": [],
+        "method": "第 7 轮 6 人 prompt 全部实测;第 1 轮实测 1 人;中间轮次 = 实测第 7 轮减去尾部发言实测比例;输出取实测回合决策长度"
+      },
+      "motif": {
+        "declared": {
+          "身份败露": 1,
+          "灭口": 2,
+          "恐惧": 1,
+          "复仇": 1,
+          "欠债被逼": 1
+        },
+        "inferred": {
+          "身份败露": 1,
+          "恐惧": 2,
+          "欠债被逼": 2
+        },
+        "unknown": 1
+      }
+    },
+    {
+      "id": "case-05-唐代驿站",
+      "theme": "唐代驿站",
+      "difficulty": "medium",
+      "seed": 5505,
+      "killer": 0,
+      "slots": [
+        "19:00",
+        "19:45",
+        "20:20",
+        "20:55",
+        "21:35"
+      ],
+      "murderSlot": 3,
+      "title": "马厩残酒赤岭寒",
+      "ok": true,
+      "failedChecks": [],
+      "checkMatrix": [
+        {
+          "id": "schema",
+          "name": "结构完整性(前置)",
+          "ok": true,
+          "nFailed": 0
+        },
+        {
+          "id": "timeline",
+          "name": "时间线自洽",
+          "ok": true,
+          "nFailed": 0
+        },
+        {
+          "id": "clues",
+          "name": "线索有效性",
+          "ok": true,
+          "nFailed": 0
+        },
+        {
+          "id": "solvable",
+          "name": "凶手可推导",
+          "ok": true,
+          "nFailed": 0
+        },
+        {
+          "id": "secret",
+          "name": "秘密与身份一致",
+          "ok": true,
+          "nFailed": 0
+        },
+        {
+          "id": "spoiler",
+          "name": "无泄底",
+          "ok": true,
+          "nFailed": 0
+        },
+        {
+          "id": "motif",
+          "name": "套路化检测",
+          "ok": true,
+          "nFailed": 0
+        }
+      ],
+      "warningCount": 13,
+      "warnings": [
+        "[时间线自洽] 时间线9(21:35)提到了「郑敬之」,但他不在 present/witnesses 里",
+        "[线索有效性] 线索C7 标成红鲱鱼、指向别人,但文本里点的是真凶「陈九」—— 它更像证据,不像假线索",
+        "[线索有效性] 线索C8 标成红鲱鱼、指向别人,但文本里点的是真凶「陈九」—— 它更像证据,不像假线索",
+        "[线索有效性] 线索C2 写到了「郑敬之」但 pointsTo 不含他 —— 可能是漏标",
+        "[线索有效性] 线索C4 写到了「陈九」但 pointsTo 不含他 —— 可能是漏标",
+        "[线索有效性] 线索C5 写到了「周阿六」但 pointsTo 不含他 —— 可能是漏标",
+        "[线索有效性] 线索C6 写到了「陈九」但 pointsTo 不含他 —— 可能是漏标",
+        "[线索有效性] 线索C7 写到了「陈九」但 pointsTo 不含他 —— 可能是漏标",
+        "[线索有效性] 线索C7 写到了「柳三娘」但 pointsTo 不含他 —— 可能是漏标",
+        "[线索有效性] 线索C8 写到了「陈九」但 pointsTo 不含他 —— 可能是漏标",
+        "[套路化检测] 角色2 标的 motiveType「嫉妒」与动机文本更像「情感纠葛」",
+        "[套路化检测] 角色4 标的 motiveType「复仇」在动机文本里找不到任何对应关键词,标签与动机可能不符",
+        "[套路化检测] 角色5 标的 motiveType「夺产」在动机文本里找不到任何对应关键词,标签与动机可能不符"
+      ],
+      "repairRounds": 0,
+      "cost": {
+        "calls": 4,
+        "promptTokens": 4138,
+        "completionTokens": 3107,
+        "reasoningTokens": 0,
+        "cny": 0.033132,
+        "elapsedSec": 35.5,
+        "perCall": [
+          {
+            "pass": "characters",
+            "prompt": 1110,
+            "completion": 1439,
+            "reasoning": 0,
+            "peak": true,
+            "ms": 138,
+            "cny": 0.013732
+          },
+          {
+            "pass": "timeline",
+            "prompt": 760,
+            "completion": 727,
+            "reasoning": 0,
+            "peak": true,
+            "ms": 95,
+            "cny": 0.007336
+          },
+          {
+            "pass": "clues",
+            "prompt": 1113,
+            "completion": 600,
+            "reasoning": 0,
+            "peak": true,
+            "ms": 135,
+            "cny": 0.007026
+          },
+          {
+            "pass": "solution",
+            "prompt": 1155,
+            "completion": 341,
+            "reasoning": 0,
+            "peak": true,
+            "ms": 163,
+            "cny": 0.005038
+          }
+        ]
+      },
+      "size": {
+        "premiseChars": 171,
+        "bioChars": 531,
+        "secretChars": 347,
+        "timelineChars": 359,
+        "clueChars": 359,
+        "solutionChars": 385,
+        "clueCount": 8,
+        "timelineCount": 10
+      },
+      "session": {
+        "rounds": 7,
+        "characters": 6,
+        "calls": 42,
+        "perCall": [
+          {
+            "who": 0,
+            "round": 1,
+            "prompt": 1278,
+            "completion": 140,
+            "exact": true,
+            "cny": 0.003676
+          },
+          {
+            "who": 0,
+            "round": 2,
+            "prompt": 1404,
+            "completion": 140,
+            "exact": false,
+            "cny": 0.003928
+          },
+          {
+            "who": 0,
+            "round": 3,
+            "prompt": 1519,
+            "completion": 140,
+            "exact": false,
+            "cny": 0.004158
+          },
+          {
+            "who": 0,
+            "round": 4,
+            "prompt": 1651,
+            "completion": 140,
+            "exact": false,
+            "cny": 0.004422
+          },
+          {
+            "who": 0,
+            "round": 5,
+            "prompt": 1769,
+            "completion": 140,
+            "exact": false,
+            "cny": 0.004658
+          },
+          {
+            "who": 0,
+            "round": 6,
+            "prompt": 1888,
+            "completion": 140,
+            "exact": false,
+            "cny": 0.004895999999999999
+          },
+          {
+            "who": 0,
+            "round": 7,
+            "prompt": 2149,
+            "completion": 140,
+            "exact": true,
+            "cny": 0.005417999999999999
+          },
+          {
+            "who": 1,
+            "round": 1,
+            "prompt": 1259,
+            "completion": 140,
+            "exact": false,
+            "cny": 0.0036379999999999997
+          },
+          {
+            "who": 1,
+            "round": 2,
+            "prompt": 1385,
+            "completion": 140,
+            "exact": false,
+            "cny": 0.00389
+          },
+          {
+            "who": 1,
+            "round": 3,
+            "prompt": 1500,
+            "completion": 140,
+            "exact": false,
+            "cny": 0.00412
+          },
+          {
+            "who": 1,
+            "round": 4,
+            "prompt": 1632,
+            "completion": 140,
+            "exact": false,
+            "cny": 0.004384
+          },
+          {
+            "who": 1,
+            "round": 5,
+            "prompt": 1750,
+            "completion": 140,
+            "exact": false,
+            "cny": 0.00462
+          },
+          {
+            "who": 1,
+            "round": 6,
+            "prompt": 1869,
+            "completion": 140,
+            "exact": false,
+            "cny": 0.0048579999999999995
+          },
+          {
+            "who": 1,
+            "round": 7,
+            "prompt": 2130,
+            "completion": 140,
+            "exact": true,
+            "cny": 0.005379999999999999
+          },
+          {
+            "who": 2,
+            "round": 1,
+            "prompt": 1270,
+            "completion": 140,
+            "exact": false,
+            "cny": 0.00366
+          },
+          {
+            "who": 2,
+            "round": 2,
+            "prompt": 1396,
+            "completion": 140,
+            "exact": false,
+            "cny": 0.0039120000000000005
+          },
+          {
+            "who": 2,
+            "round": 3,
+            "prompt": 1511,
+            "completion": 140,
+            "exact": false,
+            "cny": 0.004142
+          },
+          {
+            "who": 2,
+            "round": 4,
+            "prompt": 1643,
+            "completion": 140,
+            "exact": false,
+            "cny": 0.004406
+          },
+          {
+            "who": 2,
+            "round": 5,
+            "prompt": 1761,
+            "completion": 140,
+            "exact": false,
+            "cny": 0.004642
+          },
+          {
+            "who": 2,
+            "round": 6,
+            "prompt": 1880,
+            "completion": 140,
+            "exact": false,
+            "cny": 0.00488
+          },
+          {
+            "who": 2,
+            "round": 7,
+            "prompt": 2141,
+            "completion": 140,
+            "exact": true,
+            "cny": 0.0054020000000000006
+          },
+          {
+            "who": 3,
+            "round": 1,
+            "prompt": 1263,
+            "completion": 140,
+            "exact": false,
+            "cny": 0.003646
+          },
+          {
+            "who": 3,
+            "round": 2,
+            "prompt": 1389,
+            "completion": 140,
+            "exact": false,
+            "cny": 0.003898
+          },
+          {
+            "who": 3,
+            "round": 3,
+            "prompt": 1504,
+            "completion": 140,
+            "exact": false,
+            "cny": 0.004128
+          },
+          {
+            "who": 3,
+            "round": 4,
+            "prompt": 1636,
+            "completion": 140,
+            "exact": false,
+            "cny": 0.004392
+          },
+          {
+            "who": 3,
+            "round": 5,
+            "prompt": 1754,
+            "completion": 140,
+            "exact": false,
+            "cny": 0.004628
+          },
+          {
+            "who": 3,
+            "round": 6,
+            "prompt": 1873,
+            "completion": 140,
+            "exact": false,
+            "cny": 0.0048660000000000005
+          },
+          {
+            "who": 3,
+            "round": 7,
+            "prompt": 2134,
+            "completion": 140,
+            "exact": true,
+            "cny": 0.005388
+          },
+          {
+            "who": 4,
+            "round": 1,
+            "prompt": 1263,
+            "completion": 140,
+            "exact": false,
+            "cny": 0.003646
+          },
+          {
+            "who": 4,
+            "round": 2,
+            "prompt": 1389,
+            "completion": 140,
+            "exact": false,
+            "cny": 0.003898
+          },
+          {
+            "who": 4,
+            "round": 3,
+            "prompt": 1504,
+            "completion": 140,
+            "exact": false,
+            "cny": 0.004128
+          },
+          {
+            "who": 4,
+            "round": 4,
+            "prompt": 1636,
+            "completion": 140,
+            "exact": false,
+            "cny": 0.004392
+          },
+          {
+            "who": 4,
+            "round": 5,
+            "prompt": 1754,
+            "completion": 140,
+            "exact": false,
+            "cny": 0.004628
+          },
+          {
+            "who": 4,
+            "round": 6,
+            "prompt": 1873,
+            "completion": 140,
+            "exact": false,
+            "cny": 0.0048660000000000005
+          },
+          {
+            "who": 4,
+            "round": 7,
+            "prompt": 2134,
+            "completion": 140,
+            "exact": true,
+            "cny": 0.005388
+          },
+          {
+            "who": 5,
+            "round": 1,
+            "prompt": 1264,
+            "completion": 140,
+            "exact": false,
+            "cny": 0.0036479999999999998
+          },
+          {
+            "who": 5,
+            "round": 2,
+            "prompt": 1390,
+            "completion": 140,
+            "exact": false,
+            "cny": 0.0039
+          },
+          {
+            "who": 5,
+            "round": 3,
+            "prompt": 1505,
+            "completion": 140,
+            "exact": false,
+            "cny": 0.00413
+          },
+          {
+            "who": 5,
+            "round": 4,
+            "prompt": 1637,
+            "completion": 140,
+            "exact": false,
+            "cny": 0.004394
+          },
+          {
+            "who": 5,
+            "round": 5,
+            "prompt": 1755,
+            "completion": 140,
+            "exact": false,
+            "cny": 0.0046300000000000004
+          },
+          {
+            "who": 5,
+            "round": 6,
+            "prompt": 1874,
+            "completion": 140,
+            "exact": false,
+            "cny": 0.004868
+          },
+          {
+            "who": 5,
+            "round": 7,
+            "prompt": 2135,
+            "completion": 140,
+            "exact": true,
+            "cny": 0.005390000000000001
+          }
+        ],
+        "totalPrompt": 69451,
+        "totalCompletion": 5880,
+        "totalCny": 0.18594200000000002,
+        "peak": true,
+        "ratio": 0.6715497301464919,
+        "turnOutput": 140,
+        "measureCalls": 8,
+        "measureCny": 0.043624,
+        "measureDetail": [
+          {
+            "label": "session-speeches",
+            "prompt": 203,
+            "completion": 1353,
+            "ms": 107,
+            "peak": true,
+            "ok": true,
+            "error": ""
+          },
+          {
+            "label": "turn-r7-0",
+            "prompt": 2149,
+            "completion": 140,
+            "ms": 169,
+            "peak": true,
+            "ok": true,
+            "error": ""
+          },
+          {
+            "label": "turn-r7-1",
+            "prompt": 2130,
+            "completion": 64,
+            "ms": 129,
+            "peak": true,
+            "ok": true,
+            "error": ""
+          },
+          {
+            "label": "turn-r7-2",
+            "prompt": 2141,
+            "completion": 64,
+            "ms": 120,
+            "peak": true,
+            "ok": true,
+            "error": ""
+          },
+          {
+            "label": "turn-r7-3",
+            "prompt": 2134,
+            "completion": 64,
+            "ms": 118,
+            "peak": true,
+            "ok": true,
+            "error": ""
+          },
+          {
+            "label": "turn-r7-4",
+            "prompt": 2134,
+            "completion": 64,
+            "ms": 176,
+            "peak": true,
+            "ok": true,
+            "error": ""
+          },
+          {
+            "label": "turn-r7-5",
+            "prompt": 2135,
+            "completion": 64,
+            "ms": 138,
+            "peak": true,
+            "ok": true,
+            "error": ""
+          },
+          {
+            "label": "turn-r1-0",
+            "prompt": 1278,
+            "completion": 64,
+            "ms": 115,
+            "peak": true,
+            "ok": true,
+            "error": ""
+          }
+        ],
+        "notes": [],
+        "method": "第 7 轮 6 人 prompt 全部实测;第 1 轮实测 1 人;中间轮次 = 实测第 7 轮减去尾部发言实测比例;输出取实测回合决策长度"
+      },
+      "motif": {
+        "declared": {
+          "恐惧": 2,
+          "嫉妒": 1,
+          "欠债被逼": 1,
+          "复仇": 1,
+          "夺产": 1
+        },
+        "inferred": {
+          "恐惧": 2,
+          "情感纠葛": 1,
+          "欠债被逼": 1
+        },
+        "unknown": 2
+      }
+    }
+  ],
+  "pricing": {
+    "peak": {
+      "inputHit": 0.04,
+      "inputMiss": 2,
+      "output": 8
+    },
+    "idle": {
+      "inputHit": 0.02,
+      "inputMiss": 1,
+      "output": 4
+    }
+  },
+  "finishedAt": "2026-10-19T03:15:52.359Z"
+}

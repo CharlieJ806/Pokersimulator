@@ -2,7 +2,7 @@
  * 主控制器:把引擎、AI 代理、3D 场景串起来。
  *
  * 信息隔离的落实点:
- *   · 每个座位一个 PokerAgent 实例,只拿到 viewForSeat(seat) —— 里面没有别人的底牌。
+ *   · 每个座位一个独立的 AI 代理实例(game.createAgent),只拿到 viewForSeat(seat) ——
  *   · 3D 场景(你,荷官)拿的是 viewForDealer(),包含全部底牌,但只有「底牌 → 全部翻开」
  *     或摊牌时才渲染成正面。「翻看」只改渲染,不进任何 AI 的提示词。
  *   · 你是荷官:桌上没有你的座位,也没有你的手牌 —— 你只负责发牌、控节奏、看牌。
@@ -19,28 +19,49 @@
  *   · 界面每帧的数据打包             → ctx()(给 3D 场景的那个对象)
  * ============================================================ */
 
-import { PokerEngine } from '../core/engine.js';
-import { createEquityRun, DEFAULT_SAMPLES } from '../core/equity.js';
-// 对局快照:① 共同逻辑(节流 / 版本)在 core/gameStore.js;
-// ② 「存在哪」的差异在两个薄适配器里(core/gameStore 的 storage 参数)。
+/*
+ * ⚠️ 这个文件是**平台壳**:主页、设置、模型面板、生命周期、对局快照、
+ *    以及「驱动当前游戏往前走」的那条回合循环。
+ *    具体游戏的东西(引擎、AI 代理、牌桌画面、设置面板、下注条、单手回顾)
+ *    都在 src/games/<id>/ 里,由注册表按契约取(见 src/games/registry.mjs)。
+ *    tools/refactortest.mjs 有一条断言钉着「这里不再出现具体引擎类」——
+ *    壳对具体游戏无感,才有第二个游戏可加。
+ */
+
+import { createEquityRun, DEFAULT_SAMPLES } from '../games/poker/engine/equity.js';
+// 对局快照:① 共同逻辑(节流 / 版本)在 shared/gameStore.js;
+// ② 「存在哪」的差异在两个薄适配器里(shared/gameStore 的 storage 参数)。
 // ⚠️ app.js 本身**不碰 localStorage / IPC** —— 那样就变成两端各一份实现了。
-import { createGameStore, snapshotInfo, SAVE_INTERVAL_MS } from '../core/gameStore.js';
+import { createGameStore, snapshotInfo, SAVE_INTERVAL_MS } from '../shared/gameStore.js';
 import { resolveGameStorage } from '../shared/gameStorage.mjs';
-import { SceneTable, fmt } from '../ui3d/sceneFull.js';
-import { createSetup } from '../ui3d/setup3d.js';
+// 全局排行榜(跨游戏、跨会话):换算/排序/存储都在共享模块里,壳只负责
+// 「一场结束时把 summary 交过去」和「主页读出来画」。两端的存储差异
+// (桌面 IPC / 网页 localStorage)也在那个模块里,壳不碰。
+import { recordMatch as recordLeaderboardMatch, loadLeaderboard, clearLeaderboard, boardRows } from '../shared/leaderboard.mjs';
+import { fmt } from '../shared/format.mjs';
+import { createSetup } from '../games/poker/ui/setup.js';
 import { characterForModel, assignAccents, assignDisplayNames, displayNameForModel, GENERIC_CHAR } from '../ai/portraits.js';
-import { baseAccentFor, preloadPortraits } from '../ui3d/portraits2d.js';
-import { PERSONA_MAP } from '../ai/personas.js';
+import { baseAccentFor, preloadPortraits } from '../ui3d/sceneCore/portraits2d.js';
+import { PERSONA_MAP } from '../games/poker/personas.js';
 import { createHome } from './home.js';
-import { createPlayerBar } from './playerbar.js';
-import { createReviewPanel } from './review.js';
+import { createPlayerBar } from '../games/poker/ui/playerbar.js';
+import { createReviewPanel } from '../games/poker/ui/review.js';
 import { createModelsPanel } from './models.js';
 import { FlowController, MODE_INFO } from './flow.js';
-import { assignPersonas, PERSONAS } from '../ai/personas.js';
-import { PokerAgent } from '../ai/agent.js';
+import { assignPersonas, PERSONAS } from '../games/poker/personas.js';
+// 扑克特有的话术(街道名 / 动作名 / 结算横幅)不住在壳里 —— 见那个文件的说明。
+import { STREET_TEXT, actionLabel, settlementBanner, championBanner } from '../games/poker/ui/text.js';
 // 协议 → kind 的唯一映射(和请求构造、SSE 解析放在同一份共享模块里,
 // 免得界面上选的值和底层认的值对不上)
 import { kindForProtocol, normalizeReasoningLevel } from '../shared/llmStream.mjs';
+// 游戏设置(一期只有扑克)的唯一读取入口 —— 不在这里写死 `cfg.games.poker`:
+// 二期接游戏注册表后,「当前是哪个游戏」会变成参数/状态,读的地方一行都不用改。
+import { gameCfg, DEFAULT_GAME_ID } from '../shared/gameDefaults.mjs';
+// 游戏注册表:目录 + GameModule 契约(见 src/games/registry.mjs)。
+// 2b 之后壳只通过契约跟游戏打交道:createEngine / createAgent / mount /
+// unmount / settingsSchema / validateSnapshot —— 一个具体类名都不认识。
+// DEFAULT_GAME_ID 仍然来自 gameDefaults 真源,注册表只是把它转发出来。
+import { getGame, resolveGameId } from '../games/registry.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, Math.max(0, ms)));
 
@@ -55,11 +76,6 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, Math.max(0, ms)));
 const EQUITY_EVAL_BUDGET = 6000;
 /** 采样数下限:低于这个数误差大到没脸显示(±3% 以上) */
 const EQUITY_MIN_SAMPLES = 600;
-
-/** 街道名 → 中文(顶栏显示用) */
-const STREET_TEXT = {
-  idle: '等待开局', preflop: '翻牌前', flop: '翻牌', turn: '转牌', river: '河牌', showdown: '摊牌',
-};
 
 /**
  * 把流式片段整理成一句可读的思考。
@@ -184,6 +200,10 @@ export class GameApp {
     this.modelsPanel = null;
     this.home = null;
     this.mode = null;              // 'dealer' | 'player' —— 由主页选择
+    // 当前游戏。2a 阶段只有 poker 能玩,但「玩哪个游戏」从这一层起是**状态**,
+    // 不再是散落在各处的常量:init() 里按 cfg.ui.lastGame 恢复,主页选了别的游戏时更新。
+    this.gameId = DEFAULT_GAME_ID;
+    this.game = null;              // 当前游戏的 GameModule(引擎 / AI 代理都从它建)
 
     this.busy = false;
     this.running = false;
@@ -252,11 +272,14 @@ export class GameApp {
     });
   }
 
-  /** 把动作译成中文(思考记录里显示用) */
+  /**
+   * 把动作译成中文(思考记录里显示用)。
+   * 真源在 `games/poker/ui/text.js` —— 这里是**转发**,留给「已经按
+   * GameApp.actionLabel 写过」的调试脚本;平台壳自己不再往里加扑克话术
+   * (加第二个游戏时,那些词应该跟着各自的游戏走)。
+   */
   static actionLabel(a, amount) {
-    const t = { fold: '弃牌', check: '看牌', call: '跟注', raise: '加注', allin: '全下' }[a] || a || '—';
-    if (a === 'raise' && amount) return `加注到 ${amount}`;
-    return t;
+    return actionLabel(a, amount);
   }
 
   /* ------------------------------------------------------------ 启动 */
@@ -266,8 +289,17 @@ export class GameApp {
     this.ui = { ...this.ui, ...(this.cfg.ui || {}) };
     this.deckView = this.ui.deckView || 'down';
 
+    // ★ 当前游戏:配置里记着「上次玩的是哪个」(ui.lastGame),缺省就是一期默认游戏。
+    //   认不出的 id、以及**还没开放**的 id 一律回落 —— 回落规则只写在
+    //   registry.resolveGameId 一处(手改过的配置、将来降级回旧版本都可能留下
+    //   一个本版本不认识的 id;直接拿去 gameCfg 会得到空对象,牌局静默变默认设置)。
+    //   ⚠️ 2a 阶段 listGames() 里只有 poker 是 available,所以这里的结果恒为 poker,
+    //      实际行为与改动前完全一致;结构上留的位置是 startGame → 启动**这个**游戏的引擎。
+    this.gameId = resolveGameId(this.cfg?.ui?.lastGame);
+    this.game = getGame(this.gameId);
+
     // 存档器:storage 适配器按当前环境自动选(桌面版 IPC 文件 / 网页版 localStorage),
-    // 但**上层逻辑完全同一份**(core/gameStore.js)—— 这是两端一致性的落实点。
+    // 但**上层逻辑完全同一份**(shared/gameStore.js)—— 这是两端一致性的落实点。
     this.gameStore = createGameStore({
       storage: resolveGameStorage(window),
       getEngine: () => this.engine,
@@ -279,18 +311,20 @@ export class GameApp {
     if (this.ui.flowSpeed) this.flow.setSpeed(Number(this.ui.flowSpeed) || 1);
     if (this.ui.thinkDelayMs !== undefined) this.flow.thinkDelayMs = Number(this.ui.thinkDelayMs) || 0;
 
-    // 3D 牌桌
+    // 3D 牌桌 —— **由游戏自己挂**(契约里的 mount)。
+    // 壳只准备一个容器和它需要的几个回调;画面用什么 3D 实现、桌上摆什么道具,
+    // 壳一概不知道(2b 之前这里是 new SceneTable(...),壳直接认识扑克屏幕)。
+    // mount 的返回值约定成「这个游戏的屏幕对象」,壳拿它当通用的界面句柄用
+    // (setHint / toast / updateSeats / pushLog …)。
+    //
+    // ★ 主页可以换游戏了(谁是卧底 2b 起能玩),所以「挂哪块屏」这件事必须在
+    //    **换游戏时重做一次** —— 见 mountGameScreen()。这里只建容器。
     const tableRoot = document.createElement('div');
     tableRoot.className = 'tableRoot';
     this.root.appendChild(tableRoot);
-    this.table = new SceneTable(tableRoot, {
-      getPersona: (seat) => this.personaMap.get(seat),
-      getPortrait: (seat) => this.portraitMap.get(seat),
-      // 手牌一览里那个常驻的「退出本局」(手机上的可达入口)。
-      // 它和抽屉按钮、返回键共用 requestExit 这一条路。
-      onExitGame: () => this.requestExit(),
-    });
-    this.bindTableButtons();
+    this.tableRoot = tableRoot;
+    this.table = await this.mountGameScreen();
+    if (!this.table) throw new Error(`游戏 ${this.gameId} 的 mount() 没有返回屏幕对象`);
 
     // ★ 返回键 / 侧滑返回退出。
     //   popstate 挂在 window 上、只挂一次(不能每次开局都 addEventListener,
@@ -334,7 +368,9 @@ export class GameApp {
         this.setup.setBlindLevelHands(v);
         // 局中就地改的也要落盘:不然「改完直接关掉抽屉」会丢,
         // 下一局又变回旧周期(而设置面板里显示的却是新值 —— 最难查的那种不一致)
-        this.saveConfig({ game: { blindLevelHands: v } });
+        // ⚠️ 这是**游戏设置**(只属于当前这个游戏),所以写进 games[DEFAULT_GAME_ID],
+        //    不能写到顶层 —— 顶层是全局设置。
+        this.saveConfig({ games: { [DEFAULT_GAME_ID]: { blindLevelHands: v } } });
       },
     });
 
@@ -397,15 +433,65 @@ export class GameApp {
       // 原来「跳过,直接用上次设置开局」那个按钮会带 skipSetup 过来,按钮已删,
       // 对应的分支也一起去掉,免得留一条永远不会走到的死路)。
       onPick: (mode) => {
-        if (mode === 'player') {
-          this.enterPlayerMode();
-        } else {
-          this.mode = 'dealer';
-          this.setup.show();
+        // ★ 模式卡对**每个游戏**的含义不同(扑克:荷官/玩家;卧底:观看/加入),
+        //   但流程只有一条:定下 mode,再让「当前游戏」自己决定下一步。
+        //   游戏屏幕如果实现了 showLobby(谁是卧底),就交给它开大厅/设置页;
+        //   否则维持扑克原来那条路(进入玩家模式 / 打开设置页)。
+        this.mode = mode;
+        const ready = this._remounting || Promise.resolve();
+        ready.then(() => {
+          if (this.table?.showLobby) {
+            this.table.showLobby(mode);
+            return;
+          }
+          if (mode === 'player') {
+            this.enterPlayerMode();
+          } else {
+            this.setup.show();
+          }
+        }).catch((err) => {
+          this.table?.toast?.(`打开游戏失败:${err?.message || err}`, 'err', 6000);
+        });
+      },
+      /**
+       * 主页点了某张**能玩的**游戏卡(扑克 / 谁是卧底)。
+       *
+       * 做三件事:换成当前游戏 + 记下「上次玩的是哪个」(ui.lastGame) + 若换了游戏就重挂屏幕。
+       * **不重建引擎、不改模式** —— 真正开局仍然要等第二层那张模式卡
+       * (扑克走到 startGame;卧底走到它自己的大厅),这样「选游戏」和「开局」是两件事,
+       * 不会出现「点一下主页就替你把牌发好了」。
+       * ⚠️ 写配置是异步的,失败(比如只读存储)不该把界面卡住:记不住「上次玩哪个」
+       *    的代价只是下次回到默认游戏,而挂一个未处理的 rejection 会污染控制台
+       *    (测试里 console.error 是会算失败的)。
+       */
+      onPickGame: (game) => {
+        const changed = game.id !== this.gameId || this.game !== game;
+        this.gameId = game.id;
+        this.game = game;
+        this.saveConfig({ ui: { lastGame: game.id } }).catch(() => { /* 见上,忽略即可 */ });
+        // ★ 换游戏 = 换屏幕。2a 时只有扑克能玩,所以「挂上去的那块屏」永远不会变;
+        //   现在第二个游戏能进了,不重挂的话会点进卧底却看着扑克的牌桌。
+        //   重挂是**异步**的(游戏可能在 mount 里动态 import 3D),所以:
+        //     · 串成一条链 —— 用户连点两张游戏卡时,第二块屏必须等第一块拆完再挂,
+        //       否则两个 mount 会同时往一个容器里塞 canvas;
+        //     · 记成 this._remounting —— 紧跟着点模式卡时,onPick 会先等它完成
+        //       再决定打开哪个大厅。
+        if (changed) {
+          this._remounting = (this._remountQueue || Promise.resolve())
+            .then(() => this.mountGameScreen())
+            .catch((err) => {
+              this.table?.toast?.(`切换到「${game.title}」失败:${err?.message || err}`, 'err', 6000);
+            });
+          this._remountQueue = this._remounting;
         }
       },
       // 开局前也能配模型 —— 补上「只能开局后配、配了又不生效」那个逻辑漏洞
       onModels: () => this.openModelsPanel(),
+      // 全局排行榜:主页页脚的入口(数据在独立的持久化存储里,不在配置里)
+      // ⚠️ loadLeaderboard 返回的是**榜对象** {v, updatedAt, rows};主页要的是
+      //    「排好序、带 rank 的行」—— 这层归一化在这里做一次,别让主页知道榜的内部形状。
+      getLeaderboard: async () => boardRows(await loadLeaderboard(window)),
+      clearLeaderboard: () => clearLeaderboard(window),
       // 「继续上一局 / 放弃」两个入口(见 checkPendingSnapshot)
       onResume: (snap) => this.restoreGame(snap),
       onDiscard: () => this.abandonSnapshot(),
@@ -421,6 +507,126 @@ export class GameApp {
     //    此刻 init 已把 gameSettings / 表格 / 存档器都备好了,恢复才有条件做。
     this.checkPendingSnapshot();
     this.bindLifecycleSaves();
+  }
+
+  /**
+   * ★ 一场游戏结束 → 按本场最终排名折成全局分 → 写持久化排行榜。
+   *
+   * 输入是游戏的 `matchSummary()` 产物(统一形状,见 shared/leaderboard.mjs),
+   * 权重来自配置的 `global.leaderboard`。**永不抛**:记不上分只是丢一场战绩,
+   * 绝不能把「退出本局 / 回主页」卡住或弹错。
+   *
+   * 为什么不弹 toast:一场结束本来就有结算横幅;再叠一条「已记入排行榜」
+   * 会把结算画面遮住,而且用户不看也知道战绩就在排行榜里。
+   */
+  async recordMatchSummary(summary) {
+    if (!summary) return null;
+    try {
+      const res = await recordLeaderboardMatch({ summary, cfg: this.cfg, win: window });
+      if (!res || res.ok === false) {
+        (this.debugErrors ||= []).push(`排行榜没有记上:${res?.error || '未知原因'}`);
+        return null;
+      }
+      // 主页的排行榜面板如果正开着,把新数据画上去(没开则什么都不做)
+      this.home?.refreshLeaderboard?.();
+      return res;
+    } catch (err) {
+      (this.debugErrors ||= []).push(`排行榜写入异常:${err?.message || err}`);
+      return null;
+    }
+  }
+
+  /**
+   * 扑克的「一场」= 一整场淘汰赛(只剩一个人)。
+   *
+   * 为什么扑克由壳记、而不是屏幕自己:扑克没有独立的 ui/screen 层来管生命周期,
+   * 回合循环就在壳里(finishHand)。另外两个游戏的屏幕通过 onMatchEnded 回调
+   * 走到上面那个 recordMatchSummary —— 两条路最终都落在同一个地方。
+   *
+   * ⚠️ _matchRecorded 是幂等闸:finishHand 在「只剩一个人」之后还会被调用
+   *    (玩家继续点发牌 / 观战),没有它同一场会被记很多次。
+   */
+  _recordPokerMatch() {
+    if (this._matchRecorded) return null;
+    if (!this.engine || typeof this.game?.matchSummary !== 'function') return null;
+    this._matchRecorded = true;
+    try {
+      return this.recordMatchSummary(this.game.matchSummary(this.engine.state, gameCfg(this.cfg, this.gameId)));
+    } catch (err) {
+      (this.debugErrors ||= []).push(`扑克本场结算失败:${err?.message || err}`);
+      return null;
+    }
+  }
+
+  /**
+   * 把**当前游戏**的画面挂到容器上(换游戏时也走这里)。
+   *
+   * 为什么要单独一个方法:
+   *   以前 mount 只发生在 init 里一次 —— 因为 2a 只有扑克能玩,「当前游戏」不会变。
+   *   现在主页能换游戏了,不重挂就会「点进谁是卧底却还看着扑克的牌桌」;
+   *   而挂之前必须让**上一个**游戏的屏幕拆干净(它可能挂着自己的 canvas/渲染循环),
+   *   否则两个渲染循环同时往同一个容器里画。
+   *
+   * ctx 是壳交给游戏的**全部**外部能力(游戏不许自己去 document/配置里摸):
+   *   · 立绘与性格(按座位);
+   *   · getAgentCfg —— 该座位用哪家模型/Key(与扑克共用同一份配置规则);
+   *   · getConfig / onSaveConfig —— 读全局设置、写**这个游戏**的设置(games.<id>);
+   *   · onModels —— 打开「模型与 API Key」面板;
+   *   · onExitHome —— 退出本局回主页(卧底屏幕自己收尾后调它);
+   *   · onGameStarted/onGameEnded —— 让壳知道「现在有一局在跑」(返回键拦截、
+   *     「退出本局」入口都依赖 running)。
+   * @returns {Promise<object>} 屏幕对象
+   */
+  async mountGameScreen() {
+    if (!this.game) throw new Error('还没有选中游戏');
+    // 先拆上一个游戏的屏幕:游戏自己的 unmount 会停渲染循环 / 摘 DOM
+    try { this._lastGameModule?.unmount?.(); } catch { /* 拆失败也要继续挂新的 */ }
+    this.table = null;
+    this.tableRoot.innerHTML = '';
+    const game = this.game;
+    const screen = await this.game.mount(this.tableRoot, {
+      getPersona: (seat) => this.personaMap.get(seat),
+      getPortrait: (seat) => this.portraitMap.get(seat),
+      // 手牌一览里那个常驻的「退出本局」(手机上的可达入口)。
+      // 它和抽屉按钮、返回键共用 requestExit 这一条路。
+      onExitGame: () => this.requestExit(),
+      onExitHome: () => this.exitToHome(),
+      getAgentCfg: (seat) => this.agentCfg(seat),
+      getConfig: () => this.cfg,
+      onSaveConfig: (patch) => this.saveConfig(patch),
+      onModels: () => this.openModelsPanel(),
+      onGameStarted: () => {
+        this.running = true;
+        this.table?.setExitEnabled?.(true);
+        this.armBackGuard();
+      },
+      onGameEnded: () => {
+        this.running = false;
+        this.table?.setExitEnabled?.(false);
+        this.disarmBackGuard();
+      },
+      /**
+       * ★ 一场游戏结束(不是一局)→ 按本场最终排名折成全局分,写持久化排行榜。
+       *
+       * 为什么由**壳**做、而不是各游戏自己写:权重公式、版本号、两端存储
+       * (桌面 IPC / 网页 localStorage)都与具体游戏无关。游戏只交一个
+       * matchSummary(见 shared/leaderboard.mjs 的统一形状),壳把它换成全局分。
+       * 失败只记进 debugErrors:**记不上分不能影响退出/下一局**。
+       */
+      onMatchEnded: (summary) => { this.recordMatchSummary(summary); },
+    });
+    this._mountedGameId = game.id;
+    this._lastGameModule = game;
+    // ★ 先把 screen 挂到 this.table 上再接线:bindTableButtons 读的是 this.table.dom,
+    //   而此刻 init 里那句 `this.table = await mountGameScreen()` 还没执行 ——
+    //   以前这里直接调 bindTableButtons 会拿到 null(实测:开局白屏)。
+    this.table = screen;
+    // 扑克屏幕的按钮要接上壳的流程;其他游戏的屏幕自己管自己的按钮(没有 .dom.btnDeal)。
+    // ⚠️ 只在「这块屏确实有那些按钮」时接 —— 用 instanceof 判类会把壳重新绑死到扑克。
+    if (screen?.dom?.btnDeal) this.bindTableButtons();
+    // 玩家模式的下注条是壳建的 DOM,换回扑克之后要重新交进去,否则它定位不了
+    this.table?.setPlayerBarEl?.(this.playerBar?.el);
+    return screen;
   }
 
   /** 玩家模式入口。玩法定下来之前,先把界面切成「我上桌打」的样子 */
@@ -447,6 +653,10 @@ export class GameApp {
   exitToHome() {
     // bump generation + 掐断请求 + 解开节奏控制器的等待(旧循环看到这些就会中止)
     this.cancelRun();
+    // ★ 自有流程的游戏(谁是卧底的 runner)不读 generation / this.abort,
+    //   它们有自己的 AbortController —— 这里显式叫它停,否则退出之后
+    //   后台还会继续调用模型、继续往已经看不到的 DOM 上写。
+    try { this.table?.stopGame?.(); } catch { /* 停不下来也不能把退出流程卡住 */ }
     this.hideConfirm();
     if (this.myActionResolve) {
       // 正在等我下注:先把这个 Promise 解掉,否则 playHandLoop 会一直挂着
@@ -541,15 +751,18 @@ export class GameApp {
 
   /** 是否至少配了一家厂商的 Key(本地模型算已配置) */
   hasAnyKey() {
+    // Key / 厂商全在 global 层(对所有游戏生效);这里不再看顶层 ——
+    // 配置形状由 config.cjs / pokerApi.js 的迁移统一收口,界面只认新形状。
     const c = this.cfg || {};
-    if (c.apiKey) return true;
-    if (Object.values(c.keys || {}).some((k) => k && String(k).trim())) return true;
+    const g = c.global || {};
+    if (g.apiKey) return true;
+    if (Object.values(g.keys || {}).some((k) => k && String(k).trim())) return true;
     // 自定义中转站:地址 + 至少一个填了密钥的 Key
-    if (c.customEndpoint && (c.customKeys || []).some((k) => k?.key)) return true;
+    if (g.customEndpoint && (g.customKeys || []).some((k) => k?.key)) return true;
     // 本地模型不需要 Key —— 但只有**默认厂商就是它**时才算配好了。
     // 以前写成「列表里有任何免 Key 的厂商」:Ollama 永远在列表里,这个判断恒为真,
     // 「本地策略模式」的提示永远不出现,没填 Key 时输入框还显示「已保存」。
-    const def = (c.providerList || []).find((p) => p.id === c.defaultProvider);
+    const def = (c.providerList || []).find((p) => p.id === g.defaultProvider);
     return !!def?.noKey;
   }
 
@@ -590,14 +803,17 @@ export class GameApp {
    * 用户看到的就是「只能在开局后配,配了又不生效」这个逻辑漏洞。
    */
   openModelsPanel(seatsHint) {
-    const seats = this.engine?.state?.players?.length || seatsHint || this.cfg?.game?.seats || 6;
+    // 座位数是**游戏设置**(games[当前游戏].seats),不是全局设置 ——
+    // 但「模型分配」面板要显示几行,得知道这个游戏有几个座位(二期由 GameModule 提供)。
+    const seats = this.engine?.state?.players?.length || seatsHint
+      || gameCfg(this.cfg, this.gameId).seats || 6;
     // 开局前人数可能变了(设置页滑杆刚拖过):预览用的性格表要按新人数重建
     if (!this.engine && this.personaMap.size !== seats) this.personaMap.clear();
     // 开局前没有牌局,personaMap 是空的 —— 面板里只会显示「座位 1/2/3…」,
     // 用户不知道自己正在给谁配模型。所以这里补一份**预览用**的性格表。
     // 只影响面板的显示;真正开局时 buildEngine 会重新分配,不会被这份污染。
     if (!this.personaMap.size) {
-      const wanted = this.cfg?.seatPersonas || {};
+      const wanted = this.cfg?.global?.seatPersonas || {};
       for (let seat = 0; seat < seats; seat++) {
         const p = (wanted[seat] && PERSONA_MAP?.[wanted[seat]]) || PERSONAS[seat % PERSONAS.length];
         if (p) this.personaMap.set(seat, p);
@@ -674,9 +890,10 @@ export class GameApp {
     if (this.localOnly) return '全部本地策略';
     const list = this.cfg?.providerList || [];
     const nameOf = (id) => list.find((p) => p.id === id)?.name || id;
+    const g = this.cfg?.global || {};
     if (!this.agents.size) {
-      const p = this.cfg?.defaultProvider || 'deepseek';
-      return `${nameOf(p)}/${this.cfg?.model || '默认模型'}`;
+      const p = g.defaultProvider || 'deepseek';
+      return `${nameOf(p)}/${g.model || '默认模型'}`;
     }
     const used = new Set();
     for (const agent of this.agents.values()) used.add(agent.modelLabel || '本地策略');
@@ -693,18 +910,20 @@ export class GameApp {
    */
   resolveSeatLLM(seat, cfg = this.cfg, localOnly = this.localOnly) {
     if (localOnly) return { providerId: 'local', model: '' };
-    const c = cfg || {};
-    const pid = c.seatProviders?.[seat] || c.defaultProvider || 'deepseek';
+    // 逐座位分配全在 global 层:座位与模型分配是**跨游戏**的(用户明确要求),
+    // 换个游戏不该重新配一遍。
+    const gl = cfg?.global || {};
+    const pid = gl.seatProviders?.[seat] || gl.defaultProvider || 'deepseek';
     if (pid === 'local') return { providerId: 'local', model: '' };
-    const list = c.providerList || [];
+    const list = cfg?.providerList || [];
     const p = list.find((x) => x.id === pid);
-    // 「默认模型」(c.model)对所有**跟随默认厂商**的座位生效。
+    // 「默认模型」(gl.model)对所有**跟随默认厂商**的座位生效。
     // 以前写成 seat === 0 才用它:1 号以后的座位全拿不到(中转站这种没有 defaultModel 的
     // 厂商就会发空模型名、被拒、退回本地策略);玩家模式 0 号是人,等于没有任何 AI 用到它。
     // 反过来,0 号单独换了厂商时也不能套用别家的默认模型名。
-    const own = c.seatProviders?.[seat];
-    const followsDefault = !own || own === c.defaultProvider;
-    const model = c.seatModels?.[seat] || (followsDefault ? c.model : '') || p?.defaultModel || '';
+    const own = gl.seatProviders?.[seat];
+    const followsDefault = !own || own === gl.defaultProvider;
+    const model = gl.seatModels?.[seat] || (followsDefault ? gl.model : '') || p?.defaultModel || '';
     return { providerId: pid, model };
   }
 
@@ -716,8 +935,9 @@ export class GameApp {
    * 没选就用第一个 Key。
    */
   customKeyFor(seat, cfg = this.cfg) {
-    const list = cfg?.customKeys || [];
-    const wanted = cfg?.seatCustomKeys?.[seat];
+    const gl = cfg?.global || {};
+    const list = gl.customKeys || [];
+    const wanted = gl.seatCustomKeys?.[seat];
     return list.find((k) => k.id === wanted) || list[0] || null;
   }
 
@@ -737,8 +957,10 @@ export class GameApp {
    */
   agentCfg(seat, cfg = this.cfg, opts = {}) {
     const localOnly = opts.localOnly ?? this.localOnly;
+    // 这个座位要用的厂商/模型/Key/地址/推理档位/超时/重试 —— 全在 global 层。
+    const gl = cfg?.global || {};
     const { providerId, model } = this.resolveSeatLLM(seat, cfg, localOnly);
-    const keys = localOnly ? {} : (cfg?.keys || {});
+    const keys = localOnly ? {} : (gl.keys || {});
     const list = cfg?.providerList || [];
     const p = list.find((x) => x.id === providerId);
 
@@ -750,7 +972,7 @@ export class GameApp {
     // 不同分组的 Key 就是不同协议,写死成 openai 会让这些模型全部
     // 报 protocol_not_supported(实测)。
     if (providerId === 'custom') {
-      const endpoint = String(cfg?.customEndpoint || '').trim();
+      const endpoint = String(gl.customEndpoint || '').trim();
       const ck = this.customKeyFor(seat, cfg);
       const key = String(ck?.key || '').trim();
       return {
@@ -791,13 +1013,13 @@ export class GameApp {
          *    **死字段** —— 无论用户填多少,调用层都只用它自己的缺省值。
          *    新加配置项时务必顺着这条链走一遍:界面 → collect → 配置 → agentCfg → agent。
          */
-        reasoningLevel: normalizeReasoningLevel(cfg?.reasoningLevel),
-        timeoutMs: cfg?.timeoutMs,
-        maxTokens: cfg?.maxTokens,
+        reasoningLevel: normalizeReasoningLevel(gl.reasoningLevel),
+        timeoutMs: gl.timeoutMs,
+        maxTokens: gl.maxTokens,
         // 重试策略(times / backoffMs / budgetMs / classifyErrors)也要顺着
         // 「界面 → 配置 → agentCfg → agent」这条链走 —— 漏传就又变成一个死字段,
         // 用户在配置里怎么改都没反应(见上面那段 ⚠️)。
-        llmRetry: cfg?.llmRetry,
+        llmRetry: gl.llmRetry,
       };
     }
 
@@ -813,9 +1035,9 @@ export class GameApp {
       enabled,
       endpoint: p?.endpoint,
       kind: p?.kind || 'openai',
-      timeoutMs: cfg?.timeoutMs,
-      maxTokens: cfg?.maxTokens,
-      llmRetry: cfg?.llmRetry,   // 与上面中转站那条路同一个字段(理由见那里)
+      timeoutMs: gl.timeoutMs,
+      maxTokens: gl.maxTokens,
+      llmRetry: gl.llmRetry,   // 与上面中转站那条路同一个字段(理由见那里)
     };
   }
 
@@ -908,17 +1130,25 @@ export class GameApp {
    * 启动时查一次存档,有就在主页显示「继续上一局(第 N 手)」+「放弃」。
    *
    * 校验用 engine 的静态方法(不建实例也能验):快照里的 seats 越界时
-   * `new PokerEngine` 会抛,那种快照必须当场丢掉而不是等到用户点了「继续」才炸。
+   * 引擎会抛,那种快照必须当场丢掉而不是等到用户点了「继续」才炸。
    */
   checkPendingSnapshot() {
     if (!this.gameStore) return null;
     const snap = this.gameStore.load();
     if (!snap) return null;
+    /**
+     * ⚠️ 存档槽是**共用**的(桌面版 game.json / 网页版一个 localStorage 键):
+     *    里面可能是**别的游戏**的快照(用户在两个游戏之间换着玩)。
+     *    游戏可以用 ownsSnapshot 声明「这份不是我的」—— 那就当没有存档,
+     *    而且**绝不删它**(删了等于顺手清掉另一个游戏的进度)。
+     *    扑克没实现 ownsSnapshot(它一直是这个槽的唯一使用者),所以行为不变。
+     */
+    if (this.game?.ownsSnapshot && !this.game.ownsSnapshot(snap)) return null;
     const info = snapshotInfo(snap);
     try {
       const seats = Number(snap?.settings?.seats);
       if (!Number.isFinite(seats) || seats < 2 || seats > 9) throw new Error(`座位数非法(${snap?.settings?.seats})`);
-      PokerEngine.validateSnapshot(snap);
+      this.game?.validateSnapshot?.(snap);
     } catch (err) {
       // 坏快照必须**当场丢掉**:留着只会每次启动都在这里失败一次,
       // 而主页上还挂着一个点了就报错的「继续上一局」。
@@ -984,8 +1214,11 @@ export class GameApp {
       // 1) 先按存档里的设置**重新开局**(建引擎 + 座位 + agents + 立绘),
       //    再用快照覆盖状态。顺序不能反:buildEngine 会按 gameSettings 重发筹码,
       //    先恢复再 buildEngine 会把恢复出来的筹码全冲掉。
+      // ⚠️ 快照里存的是**引擎的 settings**(扁平的 seats / smallBlind / …),
+      //    不是配置结构 —— 所以这里只需要把它塞回 games[当前游戏] 那一格,
+      //    快照本身**不用跟着改字段名**(见 configmigrate.mjs 的快照用例)。
       await this.startGame(
-        { game: loaded.gameSettings, ui: this.ui || {} },
+        { games: { [DEFAULT_GAME_ID]: loaded.gameSettings }, ui: this.ui || {} },
         { forceLocal: this.localOnly, silent: true },
       );
       // 恢复是**原位**覆盖,不换引擎实例:3D 场景 / agents 都抓着这个引用。
@@ -1037,12 +1270,14 @@ export class GameApp {
   }
 
   /**
-   * 把快照的 settings 翻译成 buildEngine 要的 gameSettings,并顺带校验。
+   * 把快照的 settings 翻译成开局要的 gameSettings,并顺带校验。
    * 抽成一个方法是为了让「校验」只有一份 —— restoreGame 与 checkPendingSnapshot 共用。
+   * 校验规则属于**游戏自己**(它才知道快照该长什么样),所以走契约的
+   * validateSnapshot:壳只问一句「这份能用吗」,不认识任何具体引擎类。
    */
   loadSnapshotForEngine(snap) {
-    // 静态校验:版本不符 / 结构坏 / 牌不是字符串,都在这里拦掉(见 engine.validateSnapshot)
-    PokerEngine.validateSnapshot(snap);
+    // 静态校验:版本不符 / 结构坏 / 牌 id 不是数字,都在游戏那边拦掉。
+    this.game?.validateSnapshot?.(snap);
     const s = snap.settings || {};
     const gameSettings = {
       seats: Number(s.seats),
@@ -1096,9 +1331,14 @@ export class GameApp {
   async startGame(values, opts = {}) {
     this.localOnly = !!opts.forceLocal;
     this._bustNoticed = false;
+    // 新的一场开始 → 允许它结束时再记一次排行榜(上一场已经记过了)
+    this._matchRecorded = false;
     this.mode = this.mode || 'dealer';
+    // 面板交出的是**配置补丁**(global / games / ui);开局要的是当前这局游戏的规则。
+    // 用 gameCfg(values) 取,不在两处各写一遍 games.poker。
+    const game = gameCfg(values);
     this.applyFlowSettings(values.ui || {});
-    this.gameSettings = { ...values.game };
+    this.gameSettings = { ...game };
     // ★ 开新局 = 上一次的存档作废(否则「旧存档 + 新引擎」会打架:
     //   下一手写盘之前若页面被杀,回来恢复的是**上一次**那一局,
     //   而牌桌上显示的是新规则的一局)。
@@ -1109,7 +1349,7 @@ export class GameApp {
       this.home?.hideResume?.();
     }
     this.buildEngine();
-    this.table.buildSeats(values.game.seats);
+    this.table.buildSeats(game.seats);
     this.table.clearLog();
     this.running = true;
     this.handThoughts = [];
@@ -1140,7 +1380,7 @@ export class GameApp {
     if (!opts.silent) {
       this.table.toast(this.localOnly
         ? '本地策略'
-        : `${values.game.seats} 位 AI 牌手 · ${this.llmSummary()}`, 'ok', 2600);
+        : `${game.seats} 位 AI 牌手 · ${this.llmSummary()}`, 'ok', 2600);
     }
     this.table.setHint('');
     // 新的一局从第 0 手开始 —— 记住这个数,退出本局后主页那句
@@ -1148,25 +1388,28 @@ export class GameApp {
     this._savedHandNo = this.engine.state.handNo | 0;
   }
 
+  /**
+   * 建引擎 + 每个座位一个 AI 代理。
+   *
+   * ★ 2b:两件事都改成走**游戏契约**,壳不认识任何具体类:
+   *     · 引擎 = game.createEngine(游戏设置 + 宿主补的 humanSeat);
+   *     · 代理 = game.createAgent(座位, 性格, 该座位的模型配置, hooks)。
+   *   字段映射(设置面板的那一格 → 引擎参数的哪一项)因此只有**一份**,
+   *   在 src/games/poker/index.mjs 的 createEngine 里。
+   *
+   *   ⚠️ 2a 时刻意留过一份「壳里 new 引擎、游戏模块里再抄一份」的副本,
+   *      因为 blindtest / blindorbittest 会扫这个文件的源码、把构造那一句抠出来跑,
+   *      保证「设置面板 → 字段映射 → 引擎」这条链没断。2b 把那两条扫描的目标
+   *      改到了游戏模块上(它们现在扫 src/games/poker/index.mjs),
+   *      这两份映射才合并成一处 —— 扫描的**强度没有降**:除了原来那几条,
+   *      现在还多一条「app.js 里不许出现具体引擎类」。
+   */
   buildEngine() {
     const g = this.gameSettings;
-    this.engine = new PokerEngine({
-      seats: g.seats,
-      smallBlind: g.smallBlind,
-      bigBlind: g.bigBlind,
-      startingStack: g.startingStack,
-      ante: g.bigBlindAnte ? 0 : g.ante,     // 大盲前注和普通前注二选一
-      bigBlindAnte: !!g.bigBlindAnte,
-      blindLevelUp: !!g.blindLevelUp,
-      // ★ 每 N **手**按档位表升一档的周期(设置面板里那一格)。
-      //   默认 20 = 引擎里的 BLIND_LEVEL_HANDS,漏传的话引擎自己也会回落成 20,
-      //   但这里显式给一份,免得「配置项写了没接到使用处」那种坑又出现。
-      blindLevelHands: g.blindLevelHands ?? 20,
-      shortDeck: g.shortDeck,
-      // 「每 N 手翻倍」:引擎能力保留、界面入口已撤掉;配置里是什么就传什么(默认 0 = 不升盲)。
-      // 这里以前写成 `g.blindUpEvery || 0`,把 undefined 也收成 0,是安全的。
-      blindUpEvery: g.blindUpEvery || 0,
-      // 玩家模式:人坐 0 号位(座位名后面会被 persona 覆盖)
+    // humanSeat 不是游戏设置(玩家模式坐几号位是界面的决定),由宿主算好补进去 ——
+    // 契约里写明了这一点(见 registry.mjs 的 createEngine)。
+    this.engine = this.game.createEngine({
+      ...g,
       humanSeat: this.mode === 'player' ? (this.playerSeat ?? 0) : null,
     });
 
@@ -1201,12 +1444,12 @@ export class GameApp {
         continue;
       }
       // 配置里指定了性格就用它(留空/认不出则沿用随机结果)
-      const wanted = this.cfg?.seatPersonas?.[seat];
+      const wanted = this.cfg?.global?.seatPersonas?.[seat];
       const picked = (wanted && PERSONA_MAP?.[wanted]) || base;
       // 名字换成模型名,但**保留性格的打法参数**(vpip/aggression/risk…)与标签
       const persona = { ...picked, personaName: picked.name, name: names[seat] };
       this.personaMap.set(seat, persona);
-      const agent = new PokerAgent(seat, persona, this.agentCfg(seat), {});
+      const agent = this.game.createAgent(seat, persona, this.agentCfg(seat), {});
       this.agents.set(seat, agent);
       this.engine.state.players[seat].name = persona.name;
       this.engine.state.players[seat].persona = {
@@ -1301,7 +1544,8 @@ export class GameApp {
 
   /** 中途改规则:需要重开一局 */
   async applyGameSettings(values) {
-    const { game } = values;
+    // 抽屉「应用」交回来的也是配置补丁(global / games / ui),规则取当前游戏那一格。
+    const game = gameCfg(values);
     if ((this.busy || this.running) && !this.forceRestart) {
       this.pendingGameSettings = values;
       this.showConfirm(
@@ -1433,7 +1677,9 @@ export class GameApp {
    */
   _rearmBackGuard() {
     setTimeout(() => {
-      if (this.engine && this.running) this.armBackGuard();
+      // 判据是「有一局在跑」,不是「有扑克引擎」—— 谁是卧底的局没有 this.engine,
+      // 但它同样需要返回键先问一句(见 onPopState 的同一条说明)。
+      if (this.running) this.armBackGuard();
     }, 0);
   }
 
@@ -1445,7 +1691,9 @@ export class GameApp {
   onPopState() {
     // 没在牌局里(主页 / 设置页):不拦。否则用户按返回退不出网页,
     // 这是比「退不出牌局」更严重的问题。
-    if (!this.engine || !this.running) return;
+    // ★ 判据改成 this.running:以前还要 this.engine(扑克的),卧底的局没有引擎,
+    //   写成 engine 的话「谁是卧底」里按返回会直接退出页面、丢掉正在跑的一局。
+    if (!this.running) return;
 
     // ★ 第一优先:确认框正开着 → 这次返回是冲着**它**来的,收掉就完事。
     //   ⚠️ 这一条必须放在最前面。原来写成「有标记就弹框」时踩过:
@@ -1491,6 +1739,10 @@ export class GameApp {
    *   抽屉里的退出流程一改,这条路就悄悄和它不一致了。
    */
   requestExit() {
+    // ★ 游戏自己驱动的局(谁是卧底):屏幕有自己的 runner 要停、存档要写,
+    //   而且它没有「扑克抽屉」那套设置表单 —— 直接交给它收尾。
+    //   handleExit 返回 true 表示「已经处理完并回到主页」。
+    if (this.table?.handleExit?.()) return;
     const d = this.drawer;
     if (d?.requestExit) {
       d.requestExit();
@@ -2027,7 +2279,7 @@ export class GameApp {
     const applied = this.engine.state.players[seat]?.lastAction;
     this.recordThink(
       seat, agent, finalThink,
-      applied?.label || GameApp.actionLabel(decision.action, decision.amount),
+      applied?.label || actionLabel(decision.action, decision.amount),
       decision.source,
     );
 
@@ -2045,7 +2297,7 @@ export class GameApp {
     // say 是模型**主动说出口**的那句话(可以是真话,也可以是心理战)——
     // 和 thinking 是两回事:thinking 私密、玩家看不到,say 就是要给玩家看的。
     // 本地策略没有 LLM 说话,agent 会给一句跟动作对得上的中性短句。
-    const label = applied?.label || GameApp.actionLabel(decision.action, decision.amount);
+    const label = applied?.label || actionLabel(decision.action, decision.amount);
     if (this.mode === 'player' && (label || decision.say)) {
       this.actionSeat = seat;
       this.actionText = label;
@@ -2091,13 +2343,10 @@ export class GameApp {
     this.kickNoteWrites();
 
     if (result) {
-      if (result.type === 'showdown') {
-        const winNames = result.winners.map((w) => `${this.engine.seatName(w.seat)} +${fmt(w.amount)}`).join(' ');
-        this.table.showBanner('摊牌', winNames, 2600);
-      } else if (result.type === 'fold-win') {
-        const w = result.winners[0];
-        this.table.showBanner('收池', `${this.engine.seatName(w.seat)} +${fmt(w.amount)}(其他人弃牌)`, 2200);
-      }
+      // 文案由游戏给(扑克的「摊牌 / 收池」),壳只负责把它飘出来 ——
+      // 换游戏时这里一行都不用改(见 games/poker/ui/text.js)。
+      const banner = settlementBanner(result, (seat) => this.engine.seatName(seat));
+      if (banner) this.table.showBanner(banner.title, banner.sub, banner.ms);
       this.table.celebrate(result.winners.map((w) => w.seat));
     }
 
@@ -2125,8 +2374,12 @@ export class GameApp {
     const alive = players.filter((p) => p.stack > 0);
     if (alive.length < 2) {
       const champ = alive[0];
-      this.table.showBanner('牌局结束', `${champ ? this.engine.seatName(champ.seat) : '?'} 赢下全场`, 6000);
+      const banner = championBanner(champ, (seat) => this.engine.seatName(seat));
+      this.table.showBanner(banner.title, banner.sub, banner.ms);
       this.table.toast('点右上角 ⚙ 设置 →「退出本局」可以回主页再来一局', 'ok', 9000);
+      // ★ 锦标赛结束 = 扑克的「一场结束」→ 记全局分。
+      //   放在横幅之后、不 await:记排行榜(桌面走 IPC)不该拖住结算画面。
+      this._recordPokerMatch();
     } else if (this.mode === 'player' && !this._bustNoticed) {
       const me = players[this.engine.state.humanSeat];
       if (me && me.stack <= 0) {
@@ -2143,10 +2396,13 @@ export class GameApp {
 
   syncTopbar() {
     if (!this.table) return;
+    // 只有扑克屏幕有这几颗按钮(底牌三态 / 节奏 / 速度)。别的游戏屏幕不实现它们 ——
+    // 早退而不是 instanceof 判类:壳依然不认识任何具体屏幕类。
+    if (!this.table.dom?.btnPeek || !this.table.dom?.btnMode || !this.table.dom?.btnSpeed) return;
     const VIEW_LABEL = { down: '盖着', board: '只看公共牌', up: '全部翻开' };
     const VIEW_ICON = { down: '🂠', board: '👀', up: '👁' };
     const btn = this.table.dom.btnPeek;
-    // 文字部分包在 .btn__label 里(手机上只显示图标,见 sceneFull.js 顶栏模板)
+    // 文字部分包在 .btn__label 里(手机上只显示图标,见 screen.js 顶栏模板)
     btn.innerHTML = `${VIEW_ICON[this.deckView] || '🂠'}<span class="btn__label"> 底牌 <b>${VIEW_LABEL[this.deckView] || '盖着'}</b></span>`;
     btn.classList.toggle('is-active', this.deckView === 'up');
 
@@ -2178,6 +2434,9 @@ export class GameApp {
   }
 
   renderIdle() {
+    // 不是扑克(谁是卧底自己渲染自己的画面)时没有 engine —— 直接返回。
+    // 这个函数被 saveModelAssignment 等「通用」路径调用,没有这条会白屏报错。
+    if (!this.engine) return;
     const view = this.engine.viewForDealer();
     this.table.updateTopbar(view, this.statLine(), STREET_TEXT[view.street]);
     this.table.updatePot(view.pot, false);
@@ -2442,7 +2701,7 @@ export class GameApp {
 
     d.btnModels.addEventListener('click', () => this.openModelsPanel());
 
-    // ⚠️ 「💭 气泡 开/关」按钮的监听已删(按钮本身也删了,见 sceneFull.js 顶栏模板)。
+    // ⚠️ 「💭 气泡 开/关」按钮的监听已删(按钮本身也删了,见 screen.js 顶栏模板)。
     //    它原来做的是 `this.ui.showThinking = !showThinking` + saveConfig。
     //    现在思考文字恒为显示,没有任何东西可切 —— 别在这里补一个空监听,
     //    那只会让人以为按钮还在。
@@ -2465,6 +2724,11 @@ export class GameApp {
       this.drawer.show();
     });
 
+    // ⚠️ 键盘监听挂在 window 上,而 bindTableButtons 现在会**每次重挂游戏时再跑一遍**
+    //    (主页可以在扑克/卧底之间换)。不加这个开关,换一次游戏就会多一个监听:
+    //    空格会同时触发两次「下一位」,看起来像牌局在跳步。
+    if (this._keysBound) return;
+    this._keysBound = true;
     window.addEventListener('keydown', (e) => {
       const t = e.target;
       if (t instanceof HTMLInputElement || t instanceof HTMLSelectElement

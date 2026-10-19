@@ -24,7 +24,7 @@ function createWindow() {
     minWidth: 1120,
     minHeight: 720,
     backgroundColor: '#141b22',
-    title: '德州扑克模拟器 · Poker Simulator',
+    title: '桌游模拟器 · Tabletop Simulator',
     autoHideMenuBar: true,
     show: false,
     webPreferences: {

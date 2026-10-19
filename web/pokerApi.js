@@ -24,73 +24,187 @@
 // 浏览器侧走 .mjs 包装 —— .cjs 无法被具名导入(见 src/shared/providers.mjs 的说明)
 import { providerList, getProvider, PROVIDERS } from './src/shared/providers.mjs';
 import { buildRequest, consumeSseBuffer } from './src/shared/llmStream.mjs';
+// 游戏默认值的**唯一真源**(桌面版 config.cjs 通过 gameDefaults.cjs 同步桥接读同一份)。
+import { DEFAULT_GAME_ID, gameDefaultsAll } from './src/shared/gameDefaults.mjs';
 
 const STORAGE_KEY = 'poker-dealer/config/v1';
 
-/** 与桌面版 src/main/config.cjs 的 DEFAULT_CONFIG 保持一致 */
+/**
+ * 与桌面版 src/main/config.cjs 的 DEFAULT_CONFIG **逐字段一致**
+ * (global / games 两层的 deepEqual 由 tools/configmigrate.mjs 盯着)。
+ *
+ * 三层结构,理由见桌面版那份注释,这里只记两端相关的坑:
+ *   · global —— API / 模型 / 代理行为,对所有游戏生效;
+ *   · games[gameId] —— 只对那个游戏生效的规则(一期只有 poker);
+ *   · ui —— 界面与节奏。⚠️ 这一期**刻意不动**(归属二期再议)。
+ *
+ * ⚠️ 两端的默认值必须一样,否则「网页版一开局就升档、桌面版不升」
+ *    「网页版还认某个键、桌面版不认」这类差异没人查得出来。
+ *    这个仓库在 reasoningLevel / timeoutMs / blindLevelHands 上都踩过。
+ */
 const DEFAULT_CONFIG = {
-  defaultProvider: 'deepseek',
-  keys: {},
-  seatProviders: {},
-  seatModels: {},
-  endpoint: 'https://api.deepseek.com/chat/completions',
-  apiKey: '',
-  model: 'deepseek-flash',
-  temperature: 1.1,
-  // 推理型模型(deepseek-flash 等)先输出 reasoning_content 再给正式回答,
-  // 两者共用同一个 max_tokens。实测 max_tokens=300 时推理就把额度吃光、
-  // 正式回答被挤掉(finish_reason=length),决策只能从残缺文本硬猜。默认给足。
-  // 与桌面版 src/main/config.cjs 保持一致:2000。
-  maxTokens: 2000,
-  // 推理档位:与桌面版同一套(字段映射见 src/shared/llmStream.mjs 的 REASONING_LEVELS)。
-  // 'low' = 保留推理但压到各家最低档,'off' = 完全关闭,'default' = 走厂商默认。
-  // ⚠️ 两边的默认值必须一样,否则「网页版好好的、桌面版超时」这类差异没人查得出来。
-  reasoningLevel: 'low',
-  timeoutMs: 45000,
-  // Worker 转发地址:部署后填自己的,或走同源 /api/llm
-  workerUrl: '',
-  // 自定义中转站(与 config.cjs 的默认值保持一致)。
-  // protocol 逐 Key 配置 —— 中转站的令牌分组不同,协议就不同,
-  // 可选 openai / anthropic / responses / **gemini**(Google 原生格式),
-  // 见 shared/llmStream.mjs 的 RELAY_PROTOCOLS。
-  customEndpoint: '',
-  customKeys: [],
-  seatCustomKeys: {},
-  game: {
-    seats: 6,
-    shortDeck: false,
-    startingStack: 2000,
-    smallBlind: 10,
-    bigBlind: 20,
-    ante: 0,
-    bigBlindAnte: false,
-    blindLevelUp: false,
-    // 每多少**手**按档位表升一档(0 = 不按档位升盲)。
-    // ⚠️ 单位改过一次:上一版是「个人回合(orbit)」,用户实测指出不对(9 人桌设 3
-    //    = 每 27 手才升一档),现在按手算,与人数无关。默认 20,推导见
-    //    engine.js 的 BLIND_LEVEL_HANDS。
-    // ⚠️ 与 config.cjs 的默认值必须一致,否则「网页版一开局就升档、桌面版不升」这类
-    //    差异没人查得出来(同一个坑在 reasoningLevel / timeoutMs 上踩过)。
-    blindLevelHands: 20,
-    blindUpEvery: 0,
-    humanSeat: null,
+  global: {
+    defaultProvider: 'deepseek',
+    keys: {},
+    seatProviders: {},
+    seatModels: {},
+    // 逐座位的性格(决定打法;名字跟着模型走,与此无关)。
+    // 网页版以前漏了这一格 —— 模型面板有「性格」下拉,存进去却没有默认值,
+    // 默认结构两端不一致,测试立刻能看出来。
+    seatPersonas: {},
+    // 自定义中转站(与 config.cjs 的默认值保持一致)。
+    // protocol 逐 Key 配置 —— 中转站的令牌分组不同,协议就不同,
+    // 可选 openai / anthropic / responses / **gemini**(Google 原生格式),
+    // 见 shared/llmStream.mjs 的 RELAY_PROTOCOLS。
+    customEndpoint: '',
+    customKeys: [],
+    seatCustomKeys: {},
+    // 单厂商时代的兼容字段。仍有读者(hasAnyKey / app.js 的 agentCfg /
+    // 模型面板的 apiKey→keys 迁移),迁移时必须一起从顶层搬进来。
+    endpoint: 'https://api.deepseek.com/chat/completions',
+    apiKey: '',
+    model: 'deepseek-flash',
+    temperature: 1.1,
+    // 推理型模型(deepseek-flash 等)先输出 reasoning_content 再给正式回答,
+    // 两者共用同一个 max_tokens。实测 max_tokens=300 时推理就把额度吃光、
+    // 正式回答被挤掉(finish_reason=length),决策只能从残缺文本硬猜。默认给足。
+    // 与桌面版 src/main/config.cjs 保持一致:2000。
+    maxTokens: 2000,
+    // 推理档位:与桌面版同一套(字段映射见 src/shared/llmStream.mjs 的 REASONING_LEVELS)。
+    // 'off' = 完全关闭,'low' = 压到各家最低档,'default' = 走厂商默认。
+    // ⚠️ 默认是 'default' 而不是 'low',理由同桌面版 config.cjs:对本来不思考的模型
+    //    (deepseek-chat 这类),`reasoning_effort:'low'` 是**打开**推理而不是降低它 ——
+    //    实测 42 倍 completion token、3 倍耗时,答案一字不差,还容易把正式回答挤出 max_tokens。
+    reasoningLevel: 'low',
+    timeoutMs: 45000,
+    // 模型调用的重试策略。桌面版一直在用它(agent.js 的 resolveRetryPolicy 读它),
+    // 网页版以前默认值里没有 —— 不是「网页版不需要」,而是漏了:网页版同样会遇到
+    // 超时 / 5xx / 过载,缺这一格等于把两端的重试行为改成了不一样。
+    llmRetry: {
+      times: 3,
+      backoffMs: [600, 1500, 3000],
+      budgetMs: 90000,
+      classifyErrors: true,
+    },
+    /**
+     * 全局排行榜的权重 —— 与桌面版 src/main/config.cjs 的 `global.leaderboard`
+     * **逐字段一致**(configmigrate 的 deepEqual 盯着两端)。
+     *
+     * 公式与逐项理由写在 src/shared/leaderboard.mjs 的文件头(那里是唯一真源):
+     *   名次分 = 参战人数 - 名次;权重 W = 游戏系数 × 回合系数 × 人数系数;
+     *   全局分 = round(名次分 × W)。
+     *
+     * ⚠️ 网页版这层配置也有用:权重是**用户可调设置**,不是排行榜数据。
+     *    排行榜数据本身落在 localStorage 的 poker-dealer/leaderboard/v1,
+     *    与配置分开(见 shared/leaderboard.mjs 的存储说明)。
+     */
+    leaderboard: {
+      enabled: true,
+      gameWeights: { poker: 1.0, undercover: 1.0, werewolf: 1.2, avalon: 1.2 },
+      defaultGameWeight: 1.0,
+      rounds: { step: 0.05, max: 1.5 },
+      seats: { step: 0.05, base: 4, max: 1.5 },
+      maxRows: 200,
+    },
   },
+  games: gameDefaultsAll(),
+  // Worker 转发地址:部署后填自己的,或走同源 /api/llm。
+  // ⚠️ 刻意留在**顶层**、没有并进 global:它是「网页版怎么把请求送出去」的部署参数,
+  //    桌面版走主进程代理、根本没有这个概念。放进 global 等于给桌面版塞一个永远
+  //    没人读的键(本仓库反复踩的「死字段」)。留在顶层,global 才能两端逐字相等。
+  workerUrl: '',
   ui: {
     thinkDelayMs: 900,
     autoNextHand: false,
     // ⚠️ showThinking 已删(与 config.cjs 同步):顶栏的「💭 气泡」按钮和设置里的
     //    「显示思考气泡」都没了,思考文字在气泡里恒为显示。
-    //    两端默认值必须一致 —— 否则会出现「网页版还认这个键、桌面版不认」的差异。
     deckView: 'down',
     flowMode: 'manual',
     flowSpeed: 1,
+    // ⚠️ 这一层这一期**刻意不动**(flowMode / flowSpeed 的归属二期再议),
+    //    与桌面版 ui 的差异也照原样保留。tools/configmigrate.mjs 把这份差异
+    //    钉成了显式清单:哪天有人在一边加/删了 ui 键,测试会红,而不是悄悄漂移。
   },
 };
+
+/** 只认真正的「纯对象」,数组和 null 都不算 */
+function isPlainObject(v) {
+  return !!v && typeof v === 'object' && !Array.isArray(v);
+}
+
+/**
+ * 旧配置里曾经平铺在顶层的全局字段 —— 迁移白名单。
+ * ⚠️ 必须与桌面版 config.cjs 的 LEGACY_GLOBAL_FIELDS **逐字一致**:
+ *    两端迁移规则不一致的话,同一份配置在桌面版和网页版搬出来就是两套值。
+ */
+const LEGACY_GLOBAL_FIELDS = [
+  'defaultProvider', 'keys', 'seatProviders', 'seatModels', 'seatPersonas',
+  'customEndpoint', 'customKeys', 'seatCustomKeys',
+  'endpoint', 'apiKey', 'model', 'temperature', 'maxTokens',
+  'reasoningLevel', 'timeoutMs', 'llmRetry',
+];
+
+/**
+ * 旧扁平配置 → 新分层配置(global / games[gameId])。
+ *
+ * ⚠️ 必须在 `deepMerge(DEFAULT_CONFIG, raw)` **之前**跑:合并之后新位置已经被
+ *    默认值填满,「新位置没有这个键才搬」的判据永远为假 —— 旧值一个都搬不过去,
+ *    而且不报错,只表现为「一打开设置全是默认值」(用户会以为配置被重置了)。
+ *
+ * 幂等:新位置的值优先,旧键只补空缺;连读两次结果相同。
+ * 与桌面版 config.cjs 的同名函数逐条对齐(包括 gameId 参数:那边默认也是
+ * DEFAULT_GAME_ID,不写死 'poker' —— 二期主页有游戏选择后要能传别的)。
+ *
+ * @param {object} cfg
+ * @param {string} [gameId] 旧 game.* 搬到 games 的哪个游戏下
+ */
+function migrateLegacyConfig(cfg, gameId = DEFAULT_GAME_ID) {
+  if (!isPlainObject(cfg)) return cfg;
+
+  const legacyGlobal = LEGACY_GLOBAL_FIELDS.filter((k) => cfg[k] !== undefined);
+  const hasLegacyGame = Object.prototype.hasOwnProperty.call(cfg, 'game');
+  if (!legacyGlobal.length && !hasLegacyGame) return cfg;
+
+  const out = { ...cfg };
+
+  if (legacyGlobal.length) {
+    const g = { ...(isPlainObject(cfg.global) ? cfg.global : {}) };
+    for (const k of legacyGlobal) {
+      if (g[k] === undefined) g[k] = cfg[k];
+      delete out[k];
+    }
+    out.global = g;
+  }
+
+  if (hasLegacyGame) {
+    const games = { ...(isPlainObject(out.games) ? out.games : {}) };
+    const cur = { ...(isPlainObject(games[gameId]) ? games[gameId] : {}) };
+    if (isPlainObject(cfg.game)) {
+      for (const [k, v] of Object.entries(cfg.game)) {
+        // blindLevelOrbits 是已废弃的旧键(单位错的那版):**只删不迁**,
+        // 理由见 stripLegacyKeys 的注释。
+        if (k === 'blindLevelOrbits') continue;
+        if (cur[k] === undefined) cur[k] = v;
+      }
+    }
+    games[gameId] = cur;
+    out.games = games;
+    delete out.game;
+  }
+
+  return out;
+}
 
 function deepMerge(base, extra) {
   if (!extra || typeof extra !== 'object') return base;
   const out = Array.isArray(base) ? [...base] : { ...base };
   for (const [k, v] of Object.entries(extra)) {
+    // ★ `null` = **删除这个键** —— 与桌面版 config.cjs 的 deepMerge 同义。
+    //   网页版以前没有这一条(null 会被当普通值写进去),于是「把某个座位改回
+    //   随机性格」在桌面版是删键、在网页版留下一条 seatPersonas.0 = null。
+    //   运行时看着差不多,但配置里会慢慢堆一堆 null,而且「删键」在两端的语义
+    //   不再是同一件事 —— 这正是本仓库反复踩的「只在一端改」。
+    if (v === null) { delete out[k]; continue; }
     if (v && typeof v === 'object' && !Array.isArray(v) && base?.[k] && typeof base[k] === 'object') {
       out[k] = deepMerge(base[k], v);
     } else if (v !== undefined) {
@@ -103,11 +217,12 @@ function deepMerge(base, extra) {
 /* ------------------------------------------------------------ 存储 */
 
 /**
- * 清掉已废弃的配置键(game.blindLevelOrbits 和 ui.showThinking)。
+ * 清掉已废弃的配置键(现在只剩 ui.showThinking)。
  *
  * 与桌面版 config.cjs 的 stripLegacyKeys 同一份规矩:**只删键、不迁移数值** ——
  * 旧值是在「个人回合」这个错单位下填的,乘人数会造出一个用户从没打算要的数字。
- * 两端的迁移规则必须一致,否则「网页版还认旧键、桌面版不认」这种差异没人查得出来。
+ * 旧的 game.blindLevelOrbits 由 migrateLegacyConfig 处理(整组搬家时跳过它,
+ * 旧位置随之消失);这里再兜一道,防手改过的配置把旧键写进 games.poker。
  *
  * ui.showThinking 是「气泡里显不显示思考文字」的旧开关(顶栏按钮 + 设置开关都删了,
  * 现在恒为显示)。老配置里存着的 false 必须一并删掉,不然「配置写着 false、
@@ -115,11 +230,22 @@ function deepMerge(base, extra) {
  */
 function stripLegacyKeys(cfg) {
   if (!cfg) return cfg;
-  const hasOrbits = cfg.game?.blindLevelOrbits !== undefined;
+  const games = cfg.games;
+  // 每个游戏都扫一遍(不写死 games.poker):清理逻辑没必要知道
+  // blindLevelOrbits 是哪个游戏的旧键,以后加的游戏也不会被误伤别的键。
+  const gamesWithOrbits = isPlainObject(games)
+    ? Object.keys(games).filter((id) => games[id]?.blindLevelOrbits !== undefined)
+    : [];
   const hasThinking = cfg.ui?.showThinking !== undefined;
-  if (!hasOrbits && !hasThinking) return cfg;
+  if (!gamesWithOrbits.length && !hasThinking) return cfg;
   const out = { ...cfg };
-  if (hasOrbits) { out.game = { ...cfg.game }; delete out.game.blindLevelOrbits; }
+  if (gamesWithOrbits.length) {
+    out.games = { ...games };
+    for (const id of gamesWithOrbits) {
+      out.games[id] = { ...games[id] };
+      delete out.games[id].blindLevelOrbits;
+    }
+  }
   if (hasThinking) { out.ui = { ...cfg.ui }; delete out.ui.showThinking; }
   return out;
 }
@@ -128,7 +254,8 @@ function readConfig() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return JSON.parse(JSON.stringify(DEFAULT_CONFIG));
-    return stripLegacyKeys(deepMerge(DEFAULT_CONFIG, JSON.parse(raw)));
+    // ⚠️ 先迁移再合默认值(理由见 migrateLegacyConfig)。
+    return stripLegacyKeys(deepMerge(DEFAULT_CONFIG, migrateLegacyConfig(JSON.parse(raw))));
   } catch {
     return JSON.parse(JSON.stringify(DEFAULT_CONFIG));
   }
@@ -144,10 +271,12 @@ function writeConfig(cfg) {
 }
 
 function hasAnyKey(cfg) {
-  if (cfg.apiKey && cfg.apiKey.trim()) return true;
-  if (Object.values(cfg.keys || {}).some((k) => k && String(k).trim())) return true;
+  // 容错:允许被「旧形状」调用(cfg 本身就是 global 那一层)。
+  const g = isPlainObject(cfg?.global) ? cfg.global : (cfg || {});
+  if (g.apiKey && g.apiKey.trim()) return true;
+  if (Object.values(g.keys || {}).some((k) => k && String(k).trim())) return true;
   // 自定义中转站的 Key 存在 customKeys 里,不在 keys 里
-  return !!cfg.customEndpoint && (cfg.customKeys || []).some((k) => k?.key && String(k.key).trim());
+  return !!g.customEndpoint && (g.customKeys || []).some((k) => k?.key && String(k.key).trim());
 }
 
 /* ------------------------------------------------------------ Worker 转发 */
@@ -286,10 +415,10 @@ export function installWebApi() {
     },
 
     clearKey: async () => {
+      // 与桌面版 config:clearKey 同义:apiKey(单厂商兼容字段)和逐厂商的 keys
+      // 一起清。以前桌面版只清 apiKey,网页版两样都清 —— 同名操作两端不同义。
       const cfg = readConfig();
-      cfg.apiKey = '';
-      cfg.keys = {};
-      return writeConfig(cfg);
+      return writeConfig({ ...cfg, global: { ...cfg.global, apiKey: '', keys: {} } });
     },
 
     appInfo: async () => ({
@@ -331,4 +460,10 @@ export function installWebApi() {
   return api;
 }
 
-export { readConfig, writeConfig, resolveWorkerUrl, DEFAULT_CONFIG, STORAGE_KEY };
+export {
+  readConfig, writeConfig, resolveWorkerUrl, DEFAULT_CONFIG, STORAGE_KEY,
+  // 纯函数也导出:tools/configmigrate.mjs 要拿它和桌面版逐条比对
+  //(迁移/清理/深合并/判 Key 的规则必须两端同义)。
+  deepMerge, migrateLegacyConfig, stripLegacyKeys, hasAnyKey, LEGACY_GLOBAL_FIELDS,
+  DEFAULT_GAME_ID,
+};
