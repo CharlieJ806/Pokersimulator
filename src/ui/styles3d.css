@@ -828,6 +828,47 @@ input[type="range"]::-webkit-slider-thumb {
 }
 @media (max-width: 820px) { .home__modes { grid-template-columns: 1fr; } }
 
+/* ── 「继续上一局」─────────────────────────────────────────────────
+   发现存档时显示的一块卡片。放在模式卡下面而不是做成弹窗:
+   它必须**看得见但挡不住**别的路(用户想重新开一局就直接点上面的模式卡,
+   不必先处理这个提示)。
+   [hidden] 是硬性开关 —— 没有存档时它不能占位置。 */
+.home__resume {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  flex-wrap: wrap;
+  margin: 0 30px 6px;
+  padding: 14px 18px;
+  background: var(--gold-soft);
+  border: 1px solid var(--gold-2); border-radius: 14px;
+}
+.home__resume[hidden] { display: none; }
+.home__resumeHead { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.home__resumeIcon {
+  width: 38px; height: 38px; flex: 0 0 38px;
+  display: grid; place-items: center;
+  font-size: 20px; color: #fff; background: var(--ink);
+  border-radius: 11px;
+}
+.home__resumeTitle { font-weight: 700; font-size: 14px; }
+.home__resumeSub {
+  margin-top: 3px; font-size: 12px; color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.home__resumeBtns { display: flex; gap: 10px; }
+/* 触控目标:全局 .btn 是 7px padding + 13px 字号 ≈ 33px 高(桌面鼠标没问题),
+   但这两颗是**手机上最可能被点的那两颗**(决定续玩还是丢弃),所以单独抬到 40px。
+   仓库里 mobile.css 对牌桌上的按钮也是按同一套「摸得到」标准修的。 */
+.home__resumeBtns .btn {
+  min-height: 40px; padding-top: 0; padding-bottom: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+/* 手机上两个按钮各占一半,别挤成两行 —— 触控目标要够大(参见 viewport 那段注释) */
+@media (max-width: 820px) {
+  .home__resume { margin: 0 16px 6px; }
+  .home__resumeBtns { width: 100%; }
+  .home__resumeBtns .btn { flex: 1; }
+}
+
 .modecard {
   position: relative; text-align: left; cursor: pointer;
   display: flex; flex-direction: column; gap: 9px;
@@ -1047,6 +1088,18 @@ input[type="range"]::-webkit-slider-thumb {
 
 /* 公共牌行里的说明文字也要能收缩,否则会把记录按钮挤出画面 */
 .handstrip__boardHint { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 手牌一览里的「退出本局」(手机上的常驻退出入口,见 sceneFull.js 的模板注释)。
+   margin-right:auto 把它顶到左边、后面的说明文字推到右边 ——
+   本来这个「弹性空隙」是 .handstrip__note 的 flex:1 撑出来的,
+   现在两处都是 auto,放得下时各占一半,放不下时两个一起被压。
+   不换行:宁愿让说明文字被裁,也不要按钮上的字折成两行(那样标题行会变高,
+   手机上这 20 多 px 是从 3D 区里扣的)。 */
+.handstrip__exit {
+  flex: 0 0 auto;
+  margin-right: auto;
+  white-space: nowrap;
+}
 
 /* ============================================================
    常驻信息条:我的筹码 / 位置 / 底池 / 本手输赢

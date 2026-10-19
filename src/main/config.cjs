@@ -10,6 +10,7 @@ const path = require('path');
 const fs = require('fs');
 const { providerList, getProvider } = require('../shared/providers.cjs');
 const { buildRequest, consumeSseBuffer } = require('../shared/llmStream.cjs');
+const { makeGameStore } = require('./gameStore.cjs');
 
 const DEFAULT_CONFIG = {
   // 默认厂商(新版:多厂商 + 按座位分配;旧的 endpoint/apiKey 字段仍然兼容)
@@ -207,9 +208,27 @@ function makeStore(configPath) {
 /** 注册所有 IPC 处理器(重复调用安全) */
 function registerIpc(configPath) {
   const store = makeStore(configPath);
+  // 对局快照走**独立的文件**(game.json),与配置分开 —— 理由见 gameStore.cjs 的文件头。
+  const games = makeGameStore(configPath);
   const handle = (channel, fn) => {
     try { ipcMain.removeHandler(channel); } catch { /* 没注册过就忽略 */ }
     ipcMain.handle(channel, fn);
+  };
+  /**
+   * 同步 IPC(sendSync)。
+   *
+   * ⚠️ 为什么需要同步这一套:页面即将被系统回收时(visibilitychange→hidden / pagehide)
+   *    之后的异步回调**不保证还会执行**,`ipcRenderer.invoke` 可能永远不落地;
+   *    而 web/main.js 正是在那两个钩子上做「最后强存」。sendSync 会阻塞渲染进程,
+   *    所以只服务这一种场景 —— 常规保存走下面的异步通道。
+   * ⚠️ `event.returnValue` **必须**被赋值:漏了的话渲染进程会一直阻塞等回复,
+   *    表现就是「一切到后台整个页面卡死」。
+   */
+  const handleSync = (channel, fn) => {
+    try { ipcMain.removeAllListeners(channel); } catch { /* 没注册过就忽略 */ }
+    ipcMain.on(channel, (event, arg) => {
+      try { event.returnValue = fn(arg); } catch (err) { event.returnValue = { ok: false, error: err?.message || String(err) }; }
+    });
   };
 
   handle('config:get', () => {
@@ -233,6 +252,25 @@ function registerIpc(configPath) {
     cfg.apiKey = '';
     return store.write(cfg);
   });
+
+  /* ---------------------------------------------------------- 对局快照
+   *
+   * 与网页版 web/pokerApi.js 的 localStorage 分支**逐条对齐**:
+   *   读 → 读不到/坏了返回 null(调用方据此认为「没有存档」);
+   *   写 → 永远返回 { ok, error? },绝不抛(存档失败不能崩掉牌局);
+   *   清 → 删不掉也算成功语义之外的失败,返回 { ok:false, error }。
+   * 两端的共同逻辑(节流、版本丢弃)在 src/core/gameStore.js,只有一份实现。
+   * 桌面版落在同目录的 game.json,网页版落在 localStorage 的 poker-dealer/game/v1。
+   */
+  handle('game:get', () => games.read());
+  handle('game:set', (_e, snap) => games.write(snap));
+  handle('game:clear', () => games.clear());
+  // 同步版本:只给「即将被回收」的强存用(见上面 handleSync 的说明)。
+  // 通道名与异步版本分开是**故意的**:ipcMain.on 与 ipcMain.handle 是两套注册表,
+  // 同名会互相盖不到,而调用方(preload)也需要明确知道哪条路是同步的。
+  handleSync('game:getSync', () => games.read());
+  handleSync('game:setSync', (snap) => games.write(snap));
+  handleSync('game:clearSync', () => games.clear());
 
   handle('app:info', () => ({
     electron: process.versions.electron,
@@ -354,3 +392,7 @@ function registerIpc(configPath) {
 }
 
 module.exports = { registerIpc, makeStore, deepMerge, DEFAULT_CONFIG };
+// 对局快照的存储单独导出:它的行为要与网页版(pokerApi.js 的 localStorage 分支)对齐,
+// tools/snapshotest.mjs 直接 require 这个文件就能在**纯 Node**里测桌面版的路径
+// (它不依赖 electron,所以不需要开 Electron 窗口)。
+module.exports.makeGameStore = makeGameStore;

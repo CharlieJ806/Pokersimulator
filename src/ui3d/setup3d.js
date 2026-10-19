@@ -478,13 +478,27 @@ export function createSetup(root, { onStart, onSaveAI, onExitHome, onBack, onMod
     syncModels(true);
   }
 
-  q('btnExitHome')?.addEventListener('click', () => {
-    // 先保存当前设置(下次进来还是这套),再退出
+  /**
+   * 退出本局 → 回主页。
+   *
+   * ★ 这里刻意做成**对外可见的方法**,而不是只绑在抽屉那个按钮上:
+   *   手机上「退出本局」有三个入口(抽屉按钮 / 手牌一览里的常驻按钮 / 浏览器返回键),
+   *   三个入口必须走**同一套**收尾 ——
+   *     · 先把当前设置存下来(下次进来还是这套);
+   *     · 再 hide() 这张卡片;
+   *     · 最后 onExitHome()。
+   *   以前只有按钮那一条路(内联的匿名监听),别的入口要么重写一遍(迟早漂移成两套行为),
+   *   要么只调 onExitHome() 而漏掉保存 —— 于是「局中改过的设置退出后丢了」。
+   *   app.js 里的返回键确认框和手牌一览按钮都调这个方法。
+   */
+  function requestExit() {
     const values = collect();
     onSaveAI({ ...values.ai, ui: values.ui, game: values.game });
     hide();
     onExitHome?.();
-  });
+  }
+
+  q('btnExitHome')?.addEventListener('click', requestExit);
 
   function show() { wrap.classList.add('is-open'); }
   function hide() { wrap.classList.remove('is-open'); }
@@ -527,5 +541,5 @@ export function createSetup(root, { onStart, onSaveAI, onExitHome, onBack, onMod
     return v;
   }
 
-  return { show, hide, destroy, fill, collect, setApiNote, setPlayerMode, syncAI, setBlindLevelHands, el: wrap };
+  return { show, hide, destroy, fill, collect, setApiNote, setPlayerMode, syncAI, setBlindLevelHands, requestExit, el: wrap };
 }

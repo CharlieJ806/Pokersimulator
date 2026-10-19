@@ -30,6 +30,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+// 图标是**生成**的,不是素材:设计用代码描述,这里在构建期光栅化成 PNG。
+// 为什么不在 web/ 里放 png:那就变成「新增二进制素材」了(不允许),
+// 而且改配色/圆角还得重新做图。完整理由见 tools/pwaicons.mjs 的文件头。
+import { iconPng, readPngSize, ICON_SIZES, APPLE_ICON_SIZE } from './pwaicons.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -186,6 +190,45 @@ if (fs.existsSync(DECOR_SRC)) {
   warn('assets/decor 不存在 —— 后墙挂画会是空白画框');
 }
 
+/* ------------------------------------------------------------ PWA */
+
+/* 3d. PWA:manifest + service worker + 图标
+ *
+ * 三样东西缺一不可,而且**缺了不会报错** —— 用户看到的是「能打开,但加不到主屏幕 /
+ * 一刷新就回到主页」这种说不出哪里坏的体验。所以这里既复制、也在 [4] 里校验。
+ *
+ *   · manifest.json + sw.js 是**文本源文件**,从 web/ 原样复制;
+ *   · 图标是**生成**的(tools/pwaicons.mjs:纯数学光栅化 + 手写 PNG 编码),
+ *     因为不允许往仓库里塞新的二进制素材,见那个文件的文件头;
+ *   · sw.js 必须在产物**根目录**:SW 的默认 scope 就是它所在的目录,
+ *     放到子目录里只能控制那个子目录,app shell 就离线不了。
+ *
+ * ⚠️ Worker 的 assets 绑定配了 not_found_handling = single-page-application:
+ *    找不到的文件会返回 index.html + HTTP 200。所以「浏览器能打开 /sw.js」
+ *    并不代表它是 JS —— 万一它没被复制进来,浏览器拿到的是 HTML,
+ *    注册会以「MIME type ('text/html') is not a supported stylesheet MIME type」
+ *    之类的形式失败。构建期确认文件真的在,比运行时猜要省事得多。
+ */
+log('\n[3d] PWA(manifest / service worker / 图标)');
+for (const f of ['manifest.json', 'sw.js']) {
+  const src = path.join(ROOT, 'web', f);
+  if (!fs.existsSync(src)) { warn(`缺少 web/${f} —— PWA 会失效(离线 / 加到主屏幕)`); continue; }
+  fs.copyFileSync(src, path.join(OUT, f));
+  log(`  + ${f}`);
+}
+
+// 图标:192 / 512(Android + 桌面)与 180(iOS 的 apple-touch-icon)
+for (const size of [...ICON_SIZES, APPLE_ICON_SIZE]) {
+  const dst = path.join(OUT, `icon-${size}.png`);
+  const buf = iconPng(size);
+  const got = readPngSize(buf);
+  if (!got || got.w !== size || got.h !== size) {
+    warn(`图标生成异常:icon-${size}.png 应为 ${size}x${size},实际 ${got ? `${got.w}x${got.h}` : '不是合法 PNG'}`);
+  }
+  fs.writeFileSync(dst, buf);
+  log(`  + icon-${size}.png (${(buf.length / 1024).toFixed(1)} KB)`);
+}
+
 /* ------------------------------------------------------------ 校验 */
 
 log('\n[4] 校验');
@@ -290,6 +333,81 @@ if (fs.existsSync(idx) && /name=["']viewport["']/.test(fs.readFileSync(idx, 'utf
   warn('index.html 不存在 —— 入口丢了');
 } else {
   warn('index.html 缺少 viewport meta,手机上按钮会被缩小到点不准');
+}
+
+/* 4e. PWA 静态校验(manifest 必需字段 / sw.js 语法 / 图标尺寸)
+ *
+ * 与 3b 里校验 manual.js、painting.jpg 同一个思路:**构建期报警,而不是运行时静默失效**。
+ * 这三样东西坏掉的表现都很隐蔽:
+ *   · manifest 少了 icons / display → 浏览器只是「不给装」,页面上没有任何提示;
+ *   · sw.js 语法错 → 控制台一行注册失败,用户以为「网页版就是没有离线」;
+ *   · 图标尺寸不对 → Android 装出来的图标被拉伸或裁掉。
+ */
+const manifestPath = path.join(OUT, 'manifest.json');
+if (!fs.existsSync(manifestPath)) {
+  warn('manifest.json 不在产物里 —— 「添加到主屏幕」会退化成普通书签(没有独立窗口 / 没有图标)');
+} else {
+  try {
+    const mf = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    const need = ['name', 'short_name', 'start_url', 'display', 'theme_color', 'background_color', 'icons'];
+    const miss = need.filter((k) => mf[k] === undefined || mf[k] === '');
+    if (miss.length) warn(`manifest.json 缺少必需字段:${miss.join(', ')}`);
+    else log('  ok  manifest.json 合法且必需字段齐全');
+    if (mf.display !== 'standalone' && mf.display !== 'fullscreen' && mf.display !== 'minimal-ui') {
+      warn(`manifest.display = ${JSON.stringify(mf.display)} —— 不是 standalone 的话「加到主屏幕」还是浏览器壳`);
+    }
+    const icons = Array.isArray(mf.icons) ? mf.icons : [];
+    const isRemote = (s) => !s || /^(https?:|data:)/.test(s);
+    const rel = (s) => path.join(OUT, String(s).replace(/^\.\//, ''));
+    // 「清单写了个不存在的文件」只有在构建期才发现得了
+    const iconMissing = icons.map((ic) => String(ic?.src || '')).filter((s) => !isRemote(s) && !fs.existsSync(rel(s)));
+    // 「生成的尺寸和声明的对不上」同理(比如生成器参数传错)
+    const iconBad = [];
+    for (const ic of icons) {
+      const src = String(ic?.src || '');
+      if (isRemote(src) || !fs.existsSync(rel(src))) continue;
+      const got = readPngSize(fs.readFileSync(rel(src)));
+      const m = String(ic?.sizes || '').match(/^(\d+)x(\d+)$/);
+      if (!got) iconBad.push(`${src} 不是合法 PNG`);
+      else if (m && (got.w !== Number(m[1]) || got.h !== Number(m[2]))) {
+        iconBad.push(`${src} 声明 ${ic.sizes},实际 ${got.w}x${got.h}`);
+      }
+    }
+    if (iconMissing.length) for (const s of iconMissing) warn(`manifest 里声明的图标不存在:${s}`);
+    if (iconBad.length) for (const s of iconBad) warn(`图标与清单声明不一致:${s}`);
+    if (!iconMissing.length && !iconBad.length) log('  ok  manifest 声明的图标都在,且尺寸与声明一致');
+  } catch (err) {
+    warn(`manifest.json 不是合法 JSON:${err.message}`);
+  }
+}
+
+const swPath = path.join(OUT, 'sw.js');
+if (!fs.existsSync(swPath)) {
+  warn('sw.js 不在产物里 —— 没有离线能力,也没有生命周期保护(后台被回收后刷新就是重新开始)');
+} else {
+  // 语法校验:等价于浏览器解析一次。
+  // 用 new Function 而不是起子进程:sw.js 是**经典脚本**(不是 module),
+  // 而这里只需要「能不能解析」,不需要执行(它引用 self / caches,执行会抛)。
+  try {
+    // eslint-disable-next-line no-new-func
+    new Function(fs.readFileSync(swPath, 'utf8'));
+    log('  ok  sw.js 语法通过');
+  } catch (err) {
+    warn(`sw.js 语法错误:${err.message}`);
+  }
+}
+
+// HTML 里引用的 manifest / apple-touch-icon 必须真的存在(否则「加不到主屏幕」很隐蔽)
+{
+  const html = fs.existsSync(idx) ? fs.readFileSync(idx, 'utf8') : '';
+  const pwaRefs = [...html.matchAll(/<link[^>]+rel=["'](?:manifest|apple-touch-icon|icon)["'][^>]*>/g)]
+    .map((m) => (m[0].match(/href=["']([^"']+)["']/) || [])[1])
+    .filter(Boolean);
+  const gone = pwaRefs.filter((r) => !/^(https?:|data:)/.test(r) && !fs.existsSync(path.join(OUT, r.replace(/^\.\//, ''))));
+  if (gone.length) for (const g of gone) warn(`index.html 引用的 PWA 资源缺失:${g}`);
+  else if (!pwaRefs.some((r) => /manifest\.json/.test(r))) {
+    warn('index.html 没有 <link rel="manifest"> —— 浏览器不会把它当成可安装的 PWA');
+  } else log(`  ok  index.html 的 PWA 引用都在(${pwaRefs.join(', ')})`);
 }
 
 /* ------------------------------------------------------------ 体积统计 */

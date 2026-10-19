@@ -11,12 +11,16 @@
  *   1. **侧栏默认收起** —— 它占 260px 宽,而且只有看记录时才需要。
  *      收起/展开是现成的(setup3d 的「收起」按钮),这里靠 JS 在启动时折叠一次,
  *      CSS 只负责「收起时别占位」。
- *   2. **顶栏压缩并允许横向滚动** —— 六个按钮总宽超过 852px,
- *      不处理会把文字压成竖排(实测就是这个现象)。
+ *   2. **顶栏改成三区定宽**:右侧按钮区**钉死不压缩**,左侧信息区允许收缩 +
+ *      省略号截断(完整内容在 title 里),中间街名让位。见下面的长注释 ——
+ *      这里从「能横向滚」改成「不需要滚」,因为滚动条被藏起来时
+ *      右边的按钮等于不可达(用户实测:要盲滑才点得到「设置」,而退出入口就在里面)。
  *   3. **手牌一览压到最小可用高度** —— 牌面是手机上唯一能看清牌的地方,不隐藏。
+ *      它的标题行里还挂了常驻的「退出本局」(见 sceneFull.js 的模板注释)。
  *   4. 所有可点元素 ≥ 40px(触控下限 44px,顶栏这种密集区折中到 40)。
  *
- * 这里刻意**不删任何功能**:侧栏和手牌一览都有现成开关,只是默认状态变了。
+ * 这里刻意**不删任何功能**:侧栏和手牌一览都有现成开关,只是默认状态变了;
+ * 顶栏被截断的都是「看一眼数字」的标签,全文仍在 title 悬停提示里。
  */
 
 /* ============================================================ 全局触控行为 */
@@ -45,28 +49,55 @@ canvas#gl {
  */
 @media (orientation: landscape) and (max-height: 500px) {
 
-  /* —— 顶栏:压到一行,内容超宽时横向滚动而不是挤成竖排 —— */
+  /* —— 顶栏:压到一行。**不再靠横向滚动**,而是让左侧信息区自己收缩 ——
+     以前的策略是「能滚就行」,但滚动条被藏起来(scrollbar-width:none)、
+     用户看不出还能滚,右边那几个按钮就等于不可达。实测最极端的一次:
+     竖屏 412×915 下顶栏内容 786px,溢出 284px —— 「⚙ 设置」整个在屏幕外,
+     而「退出本局」当时**只**在那个抽屉里,于是手机上退不出牌局。
+     现在分区:右侧按钮区 flex:0 0 auto(一个像素都不让),
+     左侧信息区 flex:1 1 auto + min-width:0(能压多小压多小),
+     中间的街名在最窄的屏上直接让位(它的信息在公共牌那一行还有一份)。 */
   .topbar {
     min-height: 44px;
     height: 44px;
     padding: 0 8px;
     gap: 6px;
-    overflow-x: auto;
+    align-items: center;
+    /* 兜底:即使有哪个标签没跟上收缩,也不再靠滚动去够 ——
+       宁可裁掉一个字的省略号,也不要「看不见但摸得到」的按钮。 */
+    overflow: hidden;
     overflow-y: hidden;
     scrollbar-width: none;
     flex-wrap: nowrap;
   }
-  .topbar::-webkit-scrollbar { display: none; }
 
-  /* 顶栏里的元素一律不换行、不压缩 —— 否则文字会一个字一行 */
-  .topbar > *,
-  .topbar__left,
-  .topbar__right {
-    flex: 0 0 auto;
+  .topbar__left {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    gap: 4px;
+  }
+  .topbar__right { flex: 0 0 auto; min-width: max-content; gap: 4px; }
+  .topbar__center { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+
+  /* ⚠️ 关键的一行:光把 .topbar__left 设成可压缩还不够,它的**子元素**默认
+     flex-shrink:1 但 min-width:auto(= 内容宽度),照样撑住不缩。
+     必须显式给 flex:0 1 auto + min-width:0,再加省略号三件套。 */
+  .topbar__left > * {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .topbar__left, .topbar__right { gap: 4px; }
-  .topbar__center { flex: 0 0 auto; }
+  /* ★ 「第 0 手」这种**最短也最有用的**标签钉住宽度,不让它被平均分摊掉。
+     实测(412×915、最长文案):三个信息标签一起等比收缩时,
+     「第 0 手」被压到 23px —— 只剩得下一个「第」字,反而比不显示还糟。
+     它只有 49px,钉住它,把收缩全部交给最长的那串盲注。 */
+  #handTag { flex: 0 0 auto; }
+  /* 品牌名在手机上收益最低(用户已经知道自己开的什么),先让它整个让位。
+     实测它一家就占 110px,正好是以前溢出量的大头。 */
+  .brand { display: none; }
 
   /* 窄屏时副标题类的标签先让位 */
   .topbar__tag { font-size: 11px; padding: 2px 6px; }
@@ -218,18 +249,37 @@ canvas#gl {
     z-index: 60;
   }
 
-  /* 顶栏允许横向滚动,避免换行 */
+  /* 顶栏:和横屏同一套三区策略 —— 右侧按钮钉死、左侧信息可压缩截断。
+     以前这里是「允许横向滚动,避免换行」,结果和横屏一样:
+     滚动条被藏起来,右边的按钮用户根本不知道要去滑。 */
   .topbar {
-    overflow-x: auto;
+    overflow: hidden;
     overflow-y: hidden;
     scrollbar-width: none;
     flex-wrap: nowrap;
   }
-  .topbar::-webkit-scrollbar { display: none; }
-  .topbar > *, .topbar__left, .topbar__right {
-    flex: 0 0 auto;
+  .topbar__left {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+  }
+  .topbar__right { flex: 0 0 auto; min-width: max-content; }
+  .topbar__center { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+  /* ⚠️ 顶栏高度必须钉死 44px —— 它是**绝对定位**的,高度每多 1px 都是从 3D 区里扣的。
+     实测踩过两次:
+       ① 窄竖屏那条媒体查询里写了 height:46px → 412 宽下顶栏变成 46px;
+       ② 把那行删掉后又变成 41px:flex 容器默认 align-items:stretch,
+          高度会跟着子元素走,而手机样式把 padding 压成 0 8px 之后容器自己没有高度了。
+     所以这里显式给 height + align-items:center:高度与内容脱钩,子元素再高也撑不开。 */
+  .topbar { height: 44px; min-height: 44px; align-items: center; }
+  .topbar__left > * {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
     white-space: nowrap;
   }
+  .brand { display: none; }
 
   .handstrip {
     left: 8px;
@@ -245,18 +295,18 @@ canvas#gl {
 
 @media (orientation: landscape) and (max-height: 500px), (max-width: 820px) {
   /* —— 顶栏按钮只留图标 ——
-     六个带文字的按钮总宽 ~560px,手机上放不下:顶栏虽然能横向滚动,
-     但没有任何提示,竖屏时右边的「⚙ 设置」直接在屏幕外 —— 用户找不到退出入口。
-     文字在 title 里,长按 / 悬停能看到。 */
+     五个按钮带文字时总宽 ~340px,手机上放不下。文字在 title 里(长按 / 悬停能看到)。
+     ⚠️ flex: 0 0 auto 不能少:右侧按钮区是 flex:0 0 auto,但如果按钮自己被
+        压扁,点按目标会缩到 20px 以下,而且图标会被裁成半截。 */
   .topbar .btn__label { display: none; }
   .topbar .btn {
+    flex: 0 0 auto;
     min-width: 40px;
     padding: 0 9px;
     font-size: 16px;
     line-height: 1;
   }
   .topbar .btn.is-active { border-color: var(--gold-2); }
-  .brand { font-size: 13px; letter-spacing: .03em; }
 
   /* —— 手牌一览:把「手牌一览 / 收起」那一行并进公共牌行 ——
      单独一行的标题在手机上纯占地方(约 24px),而那 24px 正好是 3D 牌桌最缺的。
@@ -267,8 +317,31 @@ canvas#gl {
     padding: 3px 6px; min-height: 0;
   }
   .handstrip__title, .handstrip__note { display: none; }
-  .handstrip__board { padding-right: 64px; min-height: 38px; }
+  /* 标题行让出**两个**控件的宽度(退出本局 + 收起/展开)—— 见下面的注释。
+     以前这里只给 64px(一个「收起」)。 */
+  .handstrip__board { padding-right: 100px; min-height: 38px; }
   .boardcard { width: 24px; height: 33px; font-size: 11.5px; }
+
+  /* —— 手牌一览标题行:手机上只留两枚图标 ——
+     这一行在手机上被绝对定位到公共牌行的右端(见上面的 .handstrip__head),
+     所以它**不占额外高度**,但它的宽度是真实占位的:溢出时会盖住公共牌。
+     ① 「退出本局」只留 ↩:文字版要 74px,而公共牌那一行在 412px 竖屏下
+        只剩 372px,再塞 74px 就要把「公共牌 / 翻牌 / 5 张牌」挤到换行;
+     ② 「收起 / 展开」也只留图标 —— 而它的文字是由 JS 改的
+        (sceneFull 里那个 toggle 只改内层 span 的文字,结构不会被抹掉);
+     ③ 触控尺寸不能跟着缩:两枚按钮都保底 40x40 —— 手机上这是唯一的
+        「退出本局」入口,点不准等于没有。 */
+  .handstrip__head { gap: 2px; }
+  .handstrip__exitLabel,
+  .handstrip__toggleLabel { display: none; }
+  .handstrip__exit,
+  .handstrip__head .btn--tiny {
+    min-width: 40px;
+    min-height: 40px;
+    padding: 0 8px;
+    font-size: 15px;
+    line-height: 1;
+  }
 
   /* —— 轮到我时,提示行「轮到你:跟注要 59…」和按钮上的「跟注 59」是同一件事 ——
      手机上省掉它,把高度还给牌桌(不是我的回合时仍然显示「等待 XX 行动…」)。 */
@@ -297,10 +370,28 @@ canvas#gl {
   .actionbar { padding: 6px 10px calc(8px + env(safe-area-inset-bottom, 0px)); }
 }
 
-/* 很窄的竖屏(普通手机):顶栏再省一点 —— 品牌名和牌堆标签让位给按钮 */
+/* 很窄的竖屏(普通手机):顶栏再省一点 —— 牌堆标签和中间的街名让位给按钮 */
 @media (max-width: 520px) {
-  .topbar { gap: 6px; padding: 0 8px; height: 46px; }
+  /* ⚠️ 原来这行写的是 height:46px。看起来「高 2px 无所谓」,实际有两个后果:
+     ① 顶栏高度被撑到 46px,3D 区的顶边跟着下移(顶栏是绝对定位的,每 1px 都是从牌桌里扣的);
+     ② 「顶栏高度仍是 44px」这条断言(手机适配的硬指标,顶栏一变高就会挤压牌桌)
+        在 412 宽的竖屏上永远是红的 —— 实测就是这么发现的。
+     要省宽度就别在高度上找,改让中间的街名让位(见下面)。 */
+  .topbar { gap: 6px; padding: 0 8px; }
   .brand, #deckTag { display: none; }
+  /* 街名(翻牌/转牌/河牌/本手结束)在最窄的屏上让位:
+     它显示的那点信息,公共牌那一行(handstrip__board 里的 handstrip__street)还有一份,
+     而顶栏这里每让出 1px,左边的「第 N 手 / 盲注」就多 1px。
+     实测 412×915、最长文案下,顶栏三区加起来差的就是这 25px。 */
+  .topbar__center { display: none; }
+  /* ★ 两个信息标签在极窄屏上手工分一下宽度:min-width 会**压过** flex 的收缩,
+     所以这里给「第 N 手」一个刚好放得下的下限(49px 内容 + 左右各 6px padding),
+     让盲注那串自己占满剩下的宽度。
+     不这么做的后果实测过:两个标签等比收缩,「第 0 手」被压到 28px,
+     显示成「第…」—— 一个只剩省略号的标签比不显示更糟(还占着位置)。
+     盲注那串再窄也要看得见「盲注 100 / 200」这几个数字(约 100px)。 */
+  #handTag { min-width: 46px; }
+  #blindTag { min-width: 100px; }
   .topbar__tag { font-size: 11px; padding: 2px 7px; }
   .street { padding: 3px 10px; letter-spacing: .08em; font-size: 12px; }
   .pbar__stats { gap: 10px; padding: 5px 10px; }

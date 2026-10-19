@@ -20,6 +20,25 @@ contextBridge.exposeInMainWorld('pokerAPI', {
   llmPing: () => ipcRenderer.invoke('llm:ping'),
 
   /**
+   * 对局快照(续玩)。
+   *
+   * 与网页版 web/pokerApi.js 里同名的几个方法**逐条对齐**:
+   *   · 返回原样的快照对象 / { ok, error? },版本校验不在这里做
+   *     (两端共同的逻辑在 src/core/gameStore.js,只有一份);
+   *   · 桌面版落在 userData/game.json,网页版落在 localStorage —— 位置不同、行为相同。
+   *
+   * ⚠️ Sync 那几个是**给「页面即将被回收」用的**(visibilitychange→hidden / pagehide):
+   *    那一刻之后的异步回调不保证还会执行,所以必须 sendSync 同步写完。
+   *    sendSync 会阻塞渲染进程,常规保存一律走上面的异步版本。
+   */
+  getGame: () => ipcRenderer.invoke('game:get'),
+  setGame: (snap) => ipcRenderer.invoke('game:set', snap),
+  clearGame: () => ipcRenderer.invoke('game:clear'),
+  getGameSync: () => ipcRenderer.sendSync('game:getSync'),
+  setGameSync: (snap) => ipcRenderer.sendSync('game:setSync', snap),
+  clearGameSync: () => ipcRenderer.sendSync('game:clearSync'),
+
+  /**
    * 发起一次流式对话请求。
    * @param {{provider:string,kind?:string,endpoint:string,apiKey:string,model:string,
    *          system:string,user:string,temperature?:number,maxTokens?:number,timeoutMs?:number,

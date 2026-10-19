@@ -21,6 +21,11 @@
 
 import { PokerEngine } from '../core/engine.js';
 import { createEquityRun, DEFAULT_SAMPLES } from '../core/equity.js';
+// 对局快照:① 共同逻辑(节流 / 版本)在 core/gameStore.js;
+// ② 「存在哪」的差异在两个薄适配器里(core/gameStore 的 storage 参数)。
+// ⚠️ app.js 本身**不碰 localStorage / IPC** —— 那样就变成两端各一份实现了。
+import { createGameStore, snapshotInfo, SAVE_INTERVAL_MS } from '../core/gameStore.js';
+import { resolveGameStorage } from '../shared/gameStorage.mjs';
 import { SceneTable, fmt } from '../ui3d/sceneFull.js';
 import { createSetup } from '../ui3d/setup3d.js';
 import { characterForModel, assignAccents, assignDisplayNames, displayNameForModel, GENERIC_CHAR } from '../ai/portraits.js';
@@ -190,6 +195,12 @@ export class GameApp {
     this.forceRestart = false;
     this.debugErrors = [];
     this.localOnly = false;
+    // 返回键退出:当前这条 history 条目上有没有挂「牌局标记」(见 armBackGuard)。
+    // 用一个实例字段而不是每次都读 history.state:popstate 里需要区分
+    // 「标记刚被消费掉」和「本来就没有标记」这两种情况。
+    this.backGuardArmed = false;
+    // 「已经弹过一次确认框、还没被处理」的那一轮标记(见 onPopState 的三个分支)
+    this.backPromptUsed = false;
 
     // ⚠️ 这里原来有 showThinking(气泡里显不显示思考文字的可切开关)。
     //    已经删掉了:顶栏那个「💭 气泡 开/关」按钮和设置里的「显示思考气泡」都是它的入口,
@@ -209,6 +220,25 @@ export class GameApp {
     this.notesEvery = 3;
     this.noteWritesEnabled = true;
     this._noteInFlight = 0;
+
+    /* ---------------------------------------------------------- 对局快照(续玩)
+     *
+     * 手机上浏览器一进后台就可能被系统回收,刷新也一样 —— 内存里的 state 全丢。
+     * 这里把「存档」这件事收敛成**一个**对象 + **一个**方法(app.saveGameNow),
+     * 所有入口(引擎的状态回调、页面隐藏、构建期外的任何地方)都走它,
+     * 免得出现「A 处写了 B 处没写、刷新后退回上一个画面」这种只在某些路径复现的丢失。
+     *
+     * ⚠️ 一期**不存 AI 的记忆 / 读人笔记**:丢的代价只是「AI 少记点」,
+     *    不影响牌局继续(筹码/底牌/行动顺序全在引擎 state 里)。
+     *    把它们也塞进快照会把快照从 5KB 撑到几十 KB,而 localStorage 是同步写入 ——
+     *    手机上为了「更聪明的 AI」付主线程卡顿的代价不划算。
+     */
+    this.gameStore = null;         // window 相关的东西在 init 里再建(构造函数不该碰 DOM/存储)
+    this.pendingSnapshot = null;   // 启动时读到的、还没被用户确认的快照
+    this._resumeInfo = null;
+    this._lifecycleBound = false;
+    this._savedHandNo = 0;         // 已经落盘到第几手(用于「继续上一局(第 N 手)」)
+    this._restoring = false;       // 恢复过程中禁止写盘(见 saveGame)
 
     this.flow = new FlowController({
       mode: 'manual',
@@ -236,6 +266,14 @@ export class GameApp {
     this.ui = { ...this.ui, ...(this.cfg.ui || {}) };
     this.deckView = this.ui.deckView || 'down';
 
+    // 存档器:storage 适配器按当前环境自动选(桌面版 IPC 文件 / 网页版 localStorage),
+    // 但**上层逻辑完全同一份**(core/gameStore.js)—— 这是两端一致性的落实点。
+    this.gameStore = createGameStore({
+      storage: resolveGameStorage(window),
+      getEngine: () => this.engine,
+      intervalMs: SAVE_INTERVAL_MS,
+    });
+
     // 恢复上次的节奏设置
     if (this.ui.flowMode && MODE_INFO[this.ui.flowMode]) this.flow.mode = this.ui.flowMode;
     if (this.ui.flowSpeed) this.flow.setSpeed(Number(this.ui.flowSpeed) || 1);
@@ -248,8 +286,17 @@ export class GameApp {
     this.table = new SceneTable(tableRoot, {
       getPersona: (seat) => this.personaMap.get(seat),
       getPortrait: (seat) => this.portraitMap.get(seat),
+      // 手牌一览里那个常驻的「退出本局」(手机上的可达入口)。
+      // 它和抽屉按钮、返回键共用 requestExit 这一条路。
+      onExitGame: () => this.requestExit(),
     });
     this.bindTableButtons();
+
+    // ★ 返回键 / 侧滑返回退出。
+    //   popstate 挂在 window 上、只挂一次(不能每次开局都 addEventListener,
+    //   那样开几局就会有几个监听器,一次返回弹出好几个确认框)。
+    //   牌局不存在时 onPopState 会直接放行(见那里的注释)。
+    window.addEventListener('popstate', () => this.onPopState());
 
     // 开局设置(大厅)
     const setupRoot = document.createElement('div');
@@ -359,8 +406,21 @@ export class GameApp {
       },
       // 开局前也能配模型 —— 补上「只能开局后配、配了又不生效」那个逻辑漏洞
       onModels: () => this.openModelsPanel(),
+      // 「继续上一局 / 放弃」两个入口(见 checkPendingSnapshot)
+      onResume: (snap) => this.restoreGame(snap),
+      onDiscard: () => this.abandonSnapshot(),
     });
     this.home.show();
+    // 主页上还没有牌局 —— 「退出本局」入口从第一帧起就该是收着的。
+    // (以前它只在 exitToHome() 里被藏起来,也就是**首次进主页时是显示的**,
+    //  点下去只是再回一次主页。实测抓到过。)
+    this.table.setExitEnabled(false);
+
+    // 启动时读一次存档:有就在主页显示「继续上一局(第 N 手)」+「放弃」,让用户选。
+    // ⚠️ **不静默恢复**:用户可能就是想重新开一局,直接把他丢回上一局的牌桌更像故障。
+    //    此刻 init 已把 gameSettings / 表格 / 存档器都备好了,恢复才有条件做。
+    this.checkPendingSnapshot();
+    this.bindLifecycleSaves();
   }
 
   /** 玩家模式入口。玩法定下来之前,先把界面切成「我上桌打」的样子 */
@@ -413,6 +473,11 @@ export class GameApp {
     // 否则残留的动画会在下一局的牌桌上继续飞(牌已经不在了,看着很怪)。
     try { this.table?.table?.stopAnimations?.(); } catch { /* 忽略 */ }
 
+    // ★ 退出前**先同步存一次**:用户点「退出本局」往往紧接着就是关页面 / 切 App,
+    //   这里不存的话,「退出」这个动作本身反而把最后一步进度丢了。
+    //   此刻 engine 还在(下面才置 null),存得到。
+    this.saveGameNow();
+
     this.playerBar?.hide();
     this.reviewPanel?.hide();
     this.drawer.hide();
@@ -421,9 +486,31 @@ export class GameApp {
     // 退出时把「玩家模式」的界面改动恢复回去
     this.setup.setPlayerMode?.(false);
     this.drawer.setPlayerMode?.(false);
-    document.body.classList.remove('is-player-mode', 'is-sidepanel-open');
+    // ⚠️ 这里以前顺手把 body 上的 is-sidepanel-open 也摘掉了 —— 那是**错的**:
+    //    那个类不是「玩家模式的标记」,它是「侧栏开着」这个状态的渲染结果
+    //    (styles3d.css 靠它把手牌一览的宽度让给侧栏)。
+    //    直接摘掉之后,再开一局时侧栏的 DOM 还是展开的、却不再占位 ——
+    //    手牌一览铺满整屏、压在侧栏底下(实测:playermode 第 9 步量到
+    //    「侧栏开着」和「侧栏收起」的手牌一览都是 1240px 满宽)。
+    //    正确做法是什么都不做,让 setSidePanelOpen 保持它的内部状态与类的同步。
+    document.body.classList.remove('is-player-mode');
 
     // 牌局清空:回到主页重新来
+    //
+    // ★ 退出前**先同步存一次**(进入本段之前就做了,见上面的 saveGameNow)。
+    // ★ 存档**故意留着**:用户点的是「回主页」,不是「删除进度」——
+    //   顺手删档会变成「一退出就弃局」,而主页上那句「继续上一局」正是为这个场景准备的。
+    //   想彻底不要,主页上有「放弃」。
+    const resumeKept = this.engine
+      ? {
+        ...(this._resumeInfo || {}),
+        handNo: this.engine.state.handNo | 0,
+        street: this.engine.state.street,
+        handOver: !!this.engine.state.handOver,
+        humanSeat: this.engine.state.humanSeat ?? null,
+        players: this.engine.state.players.length,
+      }
+      : null;
     this.engine = null;
     this.agents.clear();
     this.personaMap.clear();
@@ -431,7 +518,24 @@ export class GameApp {
     this.mode = null;
     this.table.setMode('dealer', null);
     this.table.setDealEnabled(false);
+    // 「退出本局」和返回键标记都要一起收掉:
+    //   · 按钮留在主页上说不通(已经没有「本局」可退);
+    //   · 标记不清掉的话,退出后按返回会再弹一次确认框 —— 而且这次
+    //     engine 是 null,确认框确认之后什么也不会发生(用户被卡在一个死框上)。
+    this.table.setExitEnabled(false);
+    this.disarmBackGuard();
     this.table.clearLog();
+    // 有存档就把「继续上一局」重新挂出来。
+    // ⚠️ 用 _resumeInfo / _savedHandNo 里的信息,而不是读 this.engine ——
+    //    上面几行已经把 engine 置成 null 了。
+    if (resumeKept && resumeKept.handNo > 0) {
+      this._resumeInfo = resumeKept;
+      // ⚠️ 这里**没有**第二个参数(快照本体):盘上那份还在,由主页「继续」时
+      //    重新从存储读一遍 —— 拿内存里的旧快照反而可能落后于最后一次强制保存。
+      this.home?.showResume?.(resumeKept);
+    } else {
+      this.home?.hideResume?.();
+    }
     this.home?.show();
   }
 
@@ -722,6 +826,271 @@ export class GameApp {
     }
   }
 
+  /* ------------------------------------------------------------ 对局快照(续玩) */
+
+  /**
+   * **唯一的保存入口**(节流)。
+   *
+   * 为什么必须只有一个:保存要在好几个地方发生(引擎每步状态变化、页面隐藏、
+   * 未来可能还有别的),任何一处各写一份「取引擎 → 打快照 → 写存储」的话,
+   * 迟早有一处忘了处理「引擎是 null(在主页)」「写失败要吞掉」这些边界 ——
+   * 而表现是「某些路径下刷新会退回上一个画面」,极难复现。
+   */
+  saveGame() {
+    if (!this.gameStore || !this.engine) return { ok: false, written: false };
+    // 恢复过程中**绝对不许写盘**:restoreGame 会先 startGame()(建一个全新的空引擎),
+    // 再 restore() 覆盖。如果这中间有一次 onState 落了盘,盘上的存档就被
+    // 「第 0 手的空局面」冲掉了 —— 用户的上一局会在「点继续」的瞬间被抹掉。
+    if (this._restoring) return { ok: true, written: false, skipped: 'restoring' };
+    const res = this.gameStore.save();
+    if (res?.written) {
+      const st = this.engine.state;
+      this._savedHandNo = st.handNo | 0;
+      this._resumeInfo = {
+        handNo: st.handNo | 0,
+        street: st.street,
+        handOver: !!st.handOver,
+        humanSeat: st.humanSeat ?? null,
+        players: st.players.length,
+        savedAt: Date.now(),
+        version: 1,
+      };
+    }
+    return res;
+  }
+
+  /**
+   * **强制**保存一次(无视节流),用于「就要离开这个页面」的场景:
+   * visibilitychange→hidden、pagehide、beforeunload。
+   * 默认走同步通道 —— 这几处之后的异步回调不保证还会执行(见 gameStore.flush 的说明)。
+   */
+  saveGameNow({ sync = true } = {}) {
+    if (!this.gameStore || !this.engine) return { ok: false };
+    return this.gameStore.flush({ sync });
+  }
+
+  /**
+   * 接上「页面即将被回收」的三个信号 —— 这是三个阶段里**最可靠**的一次保存机会:
+   *
+   *   · visibilitychange → hidden:切到别的 App / 锁屏 / 切标签。移动端**最可靠**,
+   *     系统回收基本发生在这之后(这也是 PWA 生命周期里唯一保证会触发的信号);
+   *   · pagehide:页面真的要走了(前进后退缓存 bfcache 也会触发)。Safari 上
+   *     visibilitychange 不一定发,所以两个都接,重复保存的代价只是一次同步写;
+   *   · beforeunload:桌面浏览器关标签的兜底。⚠️ 它**不保证**触发(移动端基本没有),
+   *     所以只算兜底,绝不能当成主力。
+   *
+   * ⚠️ 不要在这里 await 任何东西:这些回调之后事件循环可能就停了。
+   */
+  bindLifecycleSaves() {
+    if (this._lifecycleBound) return;     // init 只跑一次,但重复绑定会重复写盘
+    this._lifecycleBound = true;
+
+    this._onVisibilityChange = () => {
+      // 只在**变隐藏**时存:变可见时存没有意义,而写盘是同步的,能省就省
+      if (document.visibilityState === 'hidden') this.saveGameNow();
+    };
+    this._onPageHide = () => { this.saveGameNow(); };
+    this._onBeforeUnload = (e) => {
+      this.saveGameNow();
+      // 正在打一手就提示一下(浏览器只会用自己那句通用文案,写什么都一样)。
+      // 这不是「保存手段」,是最后一道「别手滑刷新」的提醒。
+      if (this.engine && this.engine.state.handNo > 0 && !this.engine.state.handOver) {
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    };
+    document.addEventListener('visibilitychange', this._onVisibilityChange);
+    window.addEventListener('pagehide', this._onPageHide);
+    window.addEventListener('beforeunload', this._onBeforeUnload);
+  }
+
+  /**
+   * 启动时查一次存档,有就在主页显示「继续上一局(第 N 手)」+「放弃」。
+   *
+   * 校验用 engine 的静态方法(不建实例也能验):快照里的 seats 越界时
+   * `new PokerEngine` 会抛,那种快照必须当场丢掉而不是等到用户点了「继续」才炸。
+   */
+  checkPendingSnapshot() {
+    if (!this.gameStore) return null;
+    const snap = this.gameStore.load();
+    if (!snap) return null;
+    const info = snapshotInfo(snap);
+    try {
+      const seats = Number(snap?.settings?.seats);
+      if (!Number.isFinite(seats) || seats < 2 || seats > 9) throw new Error(`座位数非法(${snap?.settings?.seats})`);
+      PokerEngine.validateSnapshot(snap);
+    } catch (err) {
+      // 坏快照必须**当场丢掉**:留着只会每次启动都在这里失败一次,
+      // 而主页上还挂着一个点了就报错的「继续上一局」。
+      this.gameStore.clear();
+      (this.debugErrors ||= []).push(`丢弃了不可用的对局快照:${err?.message || err}`);
+      this.table?.toast(`上一局的存档已损坏,已丢弃(${err?.message || err})`, 'warn', 5000);
+      return null;
+    }
+    this.pendingSnapshot = snap;
+    this._resumeInfo = info;
+    this.home?.showResume?.(info, snap);
+    return info;
+  }
+
+  /** 「放弃」:丢掉存档,回到普通主页(不弹二次确认 —— 用户已经明确点了一次) */
+  abandonSnapshot() {
+    this.pendingSnapshot = null;
+    this._resumeInfo = null;
+    this.gameStore?.clear();
+    this.home?.hideResume?.();
+    this.table?.toast('已放弃上一局', 'info', 2400);
+  }
+
+  /**
+   * 用快照恢复到牌桌上。
+   *
+   * ⚠️ 重建的范围:引擎 state 之外的东西**本来就不进快照**,要重新算 ——
+   *    · agents / personaMap / portraitMap:由配置(座位模型、性格)推导,走 buildEngine
+   *      同一套逻辑(它还会同步每个 AI 的 cfg);
+   *    · 座位名:按模型重新编号(assignDisplayNames 要保证一桌不重名);
+   *    · AI 的记忆 / 读人笔记:**一期不存**,确认丢失也没关系 ——
+   *      它们只影响「AI 记不记得对手怎么打」,不影响筹码、底牌、行动顺序任何一项。
+   */
+  async restoreGame(snap = this.pendingSnapshot) {
+    // 主页那个按钮可能没带着快照对象过来(比如「退出本局」之后重新亮出的入口 ——
+    // 那时内存里已经没有引擎了,只有盘上那份)。这时**现场从存储读一遍**:
+    // 盘上那份才是真相,而且它可能比内存里记的更新(退出前刚强制保存过)。
+    if (!snap) snap = this.gameStore?.load() || null;
+    if (!snap) {
+      this.home?.hideResume?.();
+      this.table?.toast('没找到上一局的存档', 'warn', 3000);
+      return false;
+    }
+    let loaded;
+    try {
+      loaded = this.loadSnapshotForEngine(snap);
+    } catch (err) {
+      this.gameStore?.clear();
+      this.pendingSnapshot = null;
+      this.home?.hideResume?.();
+      this.table?.toast(`上一局的存档不可用,已丢弃:${err?.message || err}`, 'err', 6000);
+      return false;
+    }
+
+    this.pendingSnapshot = null;
+    this.home?.hideResume?.();
+    this.home?.hide();
+
+    // ★ 从这一刻到 restore() 完成之间不许写盘(理由见 saveGame())。
+    //   用 try/finally 保证无论哪一步抛错都会把闸门放开,否则整局都不会再存档。
+    this._restoring = true;
+    try {
+      // 1) 先按存档里的设置**重新开局**(建引擎 + 座位 + agents + 立绘),
+      //    再用快照覆盖状态。顺序不能反:buildEngine 会按 gameSettings 重发筹码,
+      //    先恢复再 buildEngine 会把恢复出来的筹码全冲掉。
+      await this.startGame(
+        { game: loaded.gameSettings, ui: this.ui || {} },
+        { forceLocal: this.localOnly, silent: true },
+      );
+      // 恢复是**原位**覆盖,不换引擎实例:3D 场景 / agents 都抓着这个引用。
+      // 换实例等于把已经建好的牌桌全部作废(而且旧循环还抓着旧引擎)。
+      this.engine.restore(loaded.snap);
+    } finally {
+      this._restoring = false;
+    }
+
+    // 2) 模式与「我坐哪」跟着存档走 —— 玩家模式开局时是 0 号位,但存档里可能是别的
+    const human = loaded.snap.progress?.humanSeat;
+    if (human !== null && human !== undefined) {
+      this.mode = 'player';
+      this.playerSeat = human;
+    }
+    this.engine.state.humanSeat = this.mode === 'player' ? (this.playerSeat ?? 0) : null;
+
+    // 3) 把手牌状态(名字/性格)按**恢复后的 state** 再对一遍:
+    //    快照里的座位名是上次那一局的,而模型分配可能已经改过。
+    this.refreshSeatNames();
+    this.buildPortraits();
+    this.table.applyPortraits?.();
+    this.table.setMode(this.mode, this.engine.state.humanSeat);
+
+    // 4) 手里那些「属于上一手」的运行时数据一律清空
+    this.handThoughts = [];
+    this.myTurnSeat = null;
+    this.myActionResolve = null;
+    this._eqSig = '';
+    this.equity = null;
+    this.table.clearLog();
+    this.table.setReviewEnabled?.(false);
+
+    this.renderIdle();
+    this.refreshDealButton();
+    this.syncTopbar();
+    this.table.toast(
+      `已恢复:第 ${this.engine.state.handNo} 手 · ${this.engine.state.players.length} 人`
+      + (this.mode === 'player' ? ' · 玩家模式' : ''),
+      'ok', 3200,
+    );
+    // 恢复成功 = 盘上那份就是当前的真相。强制同步写一次:
+    //   · 上一份是「一手打到一半」时存的,而恢复后可能立刻又变了;
+    //   · 顺手把 _resumeInfo / _savedHandNo 对齐到恢复后的 handNo。
+    this.saveGameNow();
+    // 5) 存档是「一手打到一半」的话,接着打(引擎里 actor 还在等)
+    this.resumeCurrentHand();
+    return true;
+  }
+
+  /**
+   * 把快照的 settings 翻译成 buildEngine 要的 gameSettings,并顺带校验。
+   * 抽成一个方法是为了让「校验」只有一份 —— restoreGame 与 checkPendingSnapshot 共用。
+   */
+  loadSnapshotForEngine(snap) {
+    // 静态校验:版本不符 / 结构坏 / 牌不是字符串,都在这里拦掉(见 engine.validateSnapshot)
+    PokerEngine.validateSnapshot(snap);
+    const s = snap.settings || {};
+    const gameSettings = {
+      seats: Number(s.seats),
+      shortDeck: !!s.shortDeck,
+      startingStack: Number(s.startingStack),
+      smallBlind: Number(s.smallBlind),
+      bigBlind: Number(s.bigBlind),
+      ante: Number(s.ante) || 0,
+      bigBlindAnte: !!s.bigBlindAnte,
+      blindLevelUp: !!s.blindLevelUp,
+      blindLevelHands: s.blindLevelHands,
+      blindUpEvery: s.blindUpEvery || 0,
+    };
+    if (!Number.isFinite(gameSettings.seats) || gameSettings.seats < 2 || gameSettings.seats > 9) {
+      throw new Error(`存档里的座位数非法(${s.seats})`);
+    }
+    return { snap, gameSettings };
+  }
+
+  /**
+   * 接着打**当前这一手**(恢复之后用)。
+   *
+   * 为什么不直接调 dealNext():那个方法开头会把「已经打完 / 没在打」当发新手的信号,
+   * 而恢复出来的局面恰恰是「一手打到一半」—— 走 dealNext 会发一手新的,
+   * 把恢复出来的这一手直接丢掉。
+   */
+  async resumeCurrentHand() {
+    const st = this.engine?.state;
+    if (!st) return;
+    if (st.handOver || st.street === 'idle' || st.actor === null) {
+      // 已经结算完 / 还没开局:等用户点「发牌 / 下一手」就行
+      this.refreshDealButton();
+      return;
+    }
+    this.busy = true;
+    this.table.setDealEnabled(false);
+    // ★ 必须 bump generation:恢复前可能还挂着旧的回调(计时器、流式片段),
+    //   它们看到 gen 变了就会自己退出,不会把动作打到恢复后的局面上。
+    const gen = (this.generation = (this.generation || 0) + 1);
+    this.flow.reset();
+    try {
+      await this._playOutHand(gen);
+    } finally {
+      this.busy = false;
+      this.refreshDealButton();
+    }
+  }
+
   /* ------------------------------------------------------------ 开局 */
 
   async startGame(values, opts = {}) {
@@ -730,6 +1099,15 @@ export class GameApp {
     this.mode = this.mode || 'dealer';
     this.applyFlowSettings(values.ui || {});
     this.gameSettings = { ...values.game };
+    // ★ 开新局 = 上一次的存档作废(否则「旧存档 + 新引擎」会打架:
+    //   下一手写盘之前若页面被杀,回来恢复的是**上一次**那一局,
+    //   而牌桌上显示的是新规则的一局)。
+    // 恢复流程也走这个方法,但它用 _restoring 把这一步挡住 —— 那份存档正是要用的东西。
+    if (!this._restoring) {
+      this.gameStore?.clear();
+      this._resumeInfo = null;
+      this.home?.hideResume?.();
+    }
     this.buildEngine();
     this.table.buildSeats(values.game.seats);
     this.table.clearLog();
@@ -743,13 +1121,31 @@ export class GameApp {
     this.drawer.hide();
     this.reviewPanel?.hide();
     this.table.setMode(this.mode, this.engine.state.humanSeat);
+    // ★ 把侧栏的「占位」状态同步回来。
+    //   为什么需要:那些类名(以及手牌一览的宽度)本来就是**状态推导出来的**,
+    //   而退出本局时有好几处会碰它,最典型的是以前 exitToHome 直接
+    //   classList.remove('is-sidepanel-open') —— 侧栏的 DOM 还展开着却不再占位,
+    //   重新开局后手牌一览就铺满整屏、压在侧栏底下(实测踩到过)。
+    //   这里按侧栏**实际**的展开状态重新同步一次,幂等,重复调用无副作用。
+    this.table.setSidePanelOpen(this.table.isSidePanelOpen());
     this.updatePlayerBar();
     this.renderIdle();
     this.refreshDealButton();
-    this.table.toast(this.localOnly
-      ? '本地策略'
-      : `${values.game.seats} 位 AI 牌手 · ${this.llmSummary()}`, 'ok', 2600);
+    // 牌局存在了 —— 手牌一览里的「退出本局」这时候才该出现。
+    // ★ 同时给 history 打上牌局标记:返回键从这一刻起要**问一句**再退(见 armBackGuard)。
+    this.table.setExitEnabled(true);
+    this.armBackGuard();
+    // silent:恢复流程借这条路重开局,它自己会弹一句更准确的「已恢复:第 N 手」——
+    // 这里再弹一句「6 位 AI 牌手」只会盖在上面,让人以为是新开的一局。
+    if (!opts.silent) {
+      this.table.toast(this.localOnly
+        ? '本地策略'
+        : `${values.game.seats} 位 AI 牌手 · ${this.llmSummary()}`, 'ok', 2600);
+    }
     this.table.setHint('');
+    // 新的一局从第 0 手开始 —— 记住这个数,退出本局后主页那句
+    // 「继续上一局(第 N 手)」用它,而不是用内存里可能已经被清掉的引擎状态。
+    this._savedHandNo = this.engine.state.handNo | 0;
   }
 
   buildEngine() {
@@ -829,8 +1225,19 @@ export class GameApp {
       // 所以额外弹一次提示。两个升盲模式都走 kind='level',这里就都能提示到。
       if (entry.kind === 'level') this.table.toast(`📈 ${entry.text}`, 'warn', 2600);
     };
+    /**
+     * ★ 自动存档的挂点:引擎每次「牌局状态真的变了」都会调一次
+     *   (startHand / act / 摊牌结算,见 engine.js 的 _touch)。
+     * 为什么挂在这里而不是让界面在发牌、行动、结算三处各调一次 saveGame():
+     *   界面层漏掉任何一处,表现就是「某一步之后刷新会退回上一个画面」——
+     *   而这种丢失只在特定路径复现,极难查。挂在引擎内部,漏不掉。
+     * ⚠️ 频率由 saveGame() 里的节流兜住(2 秒一次),这里只是**通知**,不做判断。
+     */
+    this.engine.onState = () => this.saveGame();
     this.buildPortraits();
     this.syncTopbar();
+    // 「接手一个已有的引擎」也要补一次存档:恢复流程里引擎是先建好再 restore 的,
+    // 中间那次 onState(空局面)不能把盘上的存档冲掉 —— restore 之后由 restoreGame 负责。
   }
 
   /**
@@ -917,10 +1324,14 @@ export class GameApp {
     this.renderIdle();
     this.refreshDealButton();
     this.table.setHint('');
+    // 中途改规则也等于「牌局还在跑」:退出入口和返回键标记都得在这里补一次
+    // (这条路径绕开了 startGame,漏掉的话返回键在改过规则之后就不拦了)
+    this.table.setExitEnabled(true);
+    this.armBackGuard();
   }
 
   /** 应用内的确认框(不用原生 confirm —— 它会阻塞渲染线程) */
-  showConfirm(title, sub, onOk) {
+  showConfirm(title, sub, onOk, opts = {}) {
     this.hideConfirm();
     const mask = document.createElement('div');
     mask.className = 'confirm';
@@ -929,12 +1340,17 @@ export class GameApp {
         <div class="confirm__title"></div>
         <div class="confirm__sub"></div>
         <div class="confirm__btns">
-          <button class="btn" data-act="cancel">取消</button>
-          <button class="btn btn--primary" data-act="ok">确定重开</button>
+          <button class="btn" data-act="cancel"></button>
+          <button class="btn btn--primary" data-act="ok"></button>
         </div>
       </div>`;
     mask.querySelector('.confirm__title').textContent = title;
     mask.querySelector('.confirm__sub').textContent = sub || '';
+    // 按钮文案可覆盖(默认是「改规则重开」那套)。返回键退出用的是同一个框,
+    // 但写「确定重开」就自相矛盾了 —— 这里只换文案,不另建一套 DOM,
+    // 免得两套确认框的样式/交互迟早漂移。
+    mask.querySelector('[data-act=cancel]').textContent = opts.cancelLabel || '取消';
+    mask.querySelector('[data-act=ok]').textContent = opts.okLabel || '确定重开';
     mask.addEventListener('click', (e) => {
       const act = e.target?.dataset?.act;
       if (act === 'ok') { this.hideConfirm(); onOk(); }
@@ -946,6 +1362,142 @@ export class GameApp {
 
   hideConfirm() {
     if (this.confirmEl) { this.confirmEl.remove(); this.confirmEl = null; }
+  }
+
+  /* ------------------------------------------------------------ 返回键退出 */
+
+  /**
+   * 手机上退出牌局的主路径:**返回键 / 侧滑返回**。
+   *
+   * 为什么不是「再给个按钮」就完事:
+   *   手机上最自然的手势就是返回,而且它不依赖任何按钮 ——
+   *   原来的问题正是「退出的按钮在被顶栏溢出挤掉的位置,要盲滑才点得到」,
+   *   再加按钮只是把这个死结挪个地方。
+   *
+   * 做法(整条链路只有**一个** history 条目,不叠罗汉):
+   *   · 开局时把**当前这条** history 条目 replaceState 成 {pokerGuard:1}。
+   *     用 replace 而不是 push:push 会在用户历史里留痕(桌面浏览器返回时
+   *     会多退一次才真正离开页面),而 replace 只标记「这一条现在归牌局管」,
+   *     不改变历史长度 —— 也就不会出现「退出后按返回又回到牌局」的循环。
+   *   · popstate 时看 history.state 里那枚标记:有标记 = 现在还在牌局里 → 弹确认;
+   *     没标记 = 已经退过一次(或本来就在主页)→ 什么都不做,让浏览器正常后退。
+   *
+   * 边界(逐条对着实测):
+   *   1. 主页 / 设置页按返回:标记已经清掉,onPopState 直接 return,不弹确认 ——
+   *      否则用户退不出网页。
+   *   2. 确认框开着时再按返回:hideConfirm() 收掉它。此时标记已经被上一步清空了,
+   *      所以走的是「没标记」那条分支,**不会**再压一条 history 进去。
+   *   3. 确认退出后:标记在弹框那一刻就清掉了(不叠加),用户停在主页那一条上,
+   *      再按返回就是正常的浏览器后退。
+   *   4. 取消之后要能**再按一次返回**:popstate 回调里同步改 history 会被浏览器忽略
+   *      (导航还在进行中),所以用 setTimeout 把条目重新标记回来(见 _rearmBackGuard)。
+   *   5. 玩家模式 / 荷官模式都生效 —— 判断的是「有没有在跑的牌局」,与模式无关。
+   */
+  armBackGuard() {
+    try {
+      // 先 disarm 再 arm:同一个会话里重复开局不会留下第二条标记
+      this.disarmBackGuard();
+      history.replaceState({ ...(history.state || {}), pokerGuard: 1 }, '', location.href);
+      this.backGuardArmed = true;
+      // 标记一挂上,「待处理的确认框」这一轮就算结束了 —— 下一次返回该重新弹框,
+      // 而不是被当成「收框」给吃掉。正常情况下这一拍很快(下一个宏任务),
+      // 但**不能依赖它快**:它就是用来兜住「重新挂标记这一步没成功」的
+      // (那时 history 标记是空的,如果连这个字段也没有,用户按第二次返回就彻底没反应了)。
+      this.backPromptUsed = false;
+    } catch (err) {
+      // 极少数环境(比如 file:// 下的某些壳)不让改 history:退回「只能点按钮退出」,
+      // 但不能因为这一步失败就让开局整个挂掉
+      console.warn('[back] 标记 history 失败:', err);
+    }
+  }
+
+  disarmBackGuard() {
+    if (!this.backGuardArmed) return;
+    this.backGuardArmed = false;
+    try {
+      const st = { ...(history.state || {}) };
+      delete st.pokerGuard;
+      history.replaceState(Object.keys(st).length ? st : null, '', location.href);
+    } catch { /* 忽略:清不掉也只是多一条标记,不影响退出流程 */ }
+  }
+
+  /**
+   * popstate 里不能同步改 history(浏览器会忽略导航过程中的 replaceState),
+   * 所以推迟一拍再把标记补回来。
+   *
+   * ⚠️ 这个「补回来」是必须的:不补的话用户会遇到
+   *   「按返回 → 弹框 → 再按返回(框没了) → 再按返回**什么都不发生**」——
+   *   想退出就得去点那个按钮,而这次改动的起因正是按钮不可达。
+   *   另外补的时候**只 replaceState,不再 push**:多一条 history 就正是
+   *   「退出之后按返回又回到牌局」那个循环的来源。
+   */
+  _rearmBackGuard() {
+    setTimeout(() => {
+      if (this.engine && this.running) this.armBackGuard();
+    }, 0);
+  }
+
+  /** 当前这条 history 条目是不是「牌局标记着」的那一条 */
+  _guarded() {
+    return !!(this.backGuardArmed || history.state?.pokerGuard);
+  }
+
+  onPopState() {
+    // 没在牌局里(主页 / 设置页):不拦。否则用户按返回退不出网页,
+    // 这是比「退不出牌局」更严重的问题。
+    if (!this.engine || !this.running) return;
+
+    // ★ 第一优先:确认框正开着 → 这次返回是冲着**它**来的,收掉就完事。
+    //   ⚠️ 这一条必须放在最前面。原来写成「有标记就弹框」时踩过:
+    //     重新挂标记是**推迟一拍**做的(setTimeout 0,见 _rearmBackGuard),
+    //     所以「弹框 → 立刻再按返回」和「弹框 → 隔一会儿再按返回」会走到两个分支,
+    //     后者的表现是又换了一个新框出来 —— 用户按两次返回就看到两次弹框,
+    //     典型得像「返回键没接好」。判据用「框在不在」而不是「标记在不在」,
+    //     就与那一拍的时序无关了。
+    if (this.confirmEl) {
+      this.backPromptUsed = false;
+      this.hideConfirm();
+      return;
+    }
+
+    // 第二次:标记还在(正常情况;重新挂标记失败时由 backPromptUsed 兜底)→ 弹框问一句
+    if (this._guarded() || this.backPromptUsed) {
+      // 消费标记 —— 「确认退出」走的就是这一步的结果,不是另压一条 history。
+      // 挂标记用 replaceState、清标记也用 replaceState,历史长度始终不变,
+      // 所以浏览器历史里**不存在**「牌局」那一条,退出后按返回也就回不去。
+      this.disarmBackGuard();
+      this.backPromptUsed = true;
+      // 但用户也可能只是想「先看看」,所以把标记补回来 ——
+      // 不然取消之后他就再也按不出这个框了(只能去点按钮,而按钮正是这次要修的痛点)。
+      this._rearmBackGuard();
+      this.showConfirm('退出本局,回主页?', '当前这一手会立刻结束,之后可以重新选模式开始新的一局。', () => {
+        // 走的是和抽屉按钮 / 手牌一览按钮**完全同一条**退出链路
+        this.requestExit();
+      }, { okLabel: '退出本局', cancelLabel: '继续打牌' });
+      return;
+    }
+
+    // 都没有:用户是在**已经退出/已经取消**之后继续按返回 ——
+    // 什么都不做,让浏览器正常后退(退到上一页)。
+  }
+
+  /**
+   * 所有「退出本局」入口的唯一收尾:**先复用抽屉那套流程**(存设置 → 关卡片 → 回主页),
+   * 再清掉返回键那些状态。
+   *
+   * 为什么一定要经过 drawer.requestExit():
+   *   那里面除了 onExitHome() 还有「把当前设置存下来」这一步。
+   *   如果这里直接调 this.exitToHome(),局中改过的设置就丢了,而且以后
+   *   抽屉里的退出流程一改,这条路就悄悄和它不一致了。
+   */
+  requestExit() {
+    const d = this.drawer;
+    if (d?.requestExit) {
+      d.requestExit();
+      return;
+    }
+    // 兜底:抽屉还没建起来(理论上不会走到)
+    this.exitToHome();
   }
 
   /* ------------------------------------------------------------ 一手的流程 */
@@ -988,6 +1540,11 @@ export class GameApp {
       this.table.toast(`牌局结束:${champ ? champ.name : '?'} 赢下全场`, 'ok', 8000);
       this.table.setDealEnabled(false);
       this.running = false;
+      // 只剩一个人 = 这一局彻底打完了,存档没有续玩的意义 —— 顺手清掉,
+      // 免得下次启动主页还挂着「继续上一局」(点进去只会看到「牌局结束」)。
+      this.gameStore?.clear();
+      this._resumeInfo = null;
+      this.home?.hideResume?.();
       return;
     }
 
@@ -1008,9 +1565,33 @@ export class GameApp {
     this.actionSay = '';
     this.actionUntil = 0;
 
+    // ⚠️ 发牌(startHand)只在这一条路径上做。恢复路径**不能**再发一手 ——
+    //    引擎 state 里那一手就是存档里那一手,重新 startHand 会把底牌和筹码全部冲掉。
+    try {
+      this.engine.startHand();
+    } catch (err) {
+      console.error(err);
+      (this.debugErrors ||= []).push('发牌出错: ' + (err?.message || err));
+      this.table.toast('发牌出错:' + (err?.message || err), 'err', 6000);
+      this.busy = false;
+      this.refreshDealButton();
+      return;
+    }
+    await this._playOutHand(gen);
+  }
+
+  /**
+   * 发一手 + 打完 + 收尾 + 决定要不要自动开下一手。
+   * 从 dealNext() 拆出来是为了让「恢复后接着打**当前这一手**」也能复用同一段逻辑
+   * (那条路径不能走 dealNext —— 它开头会把「一手打到一半」当成非法状态直接返回)。
+   *
+   * @param {number} gen 调用时捕获的 generation;中途变了说明牌局已重开,要立刻收手
+   */
+  async _playOutHand(gen) {
     const run = (async () => {
       try {
-        this.engine.startHand();
+        // ⚠️ 恢复路径下这一手**已经发过了**(startHand 的牌就在 state 里),
+        //    所以调用方负责区分;这里只按「引擎现在的状态」往下打。
         this.render();
         await sleep(200);
         const completed = await this.playHandLoop(gen);

@@ -112,6 +112,23 @@ export class SceneTable {
           <section class="handstrip" id="handStrip">
             <header class="handstrip__head">
               <span class="handstrip__title">手牌一览</span>
+              <!-- ★ 「退出本局」的常驻入口。
+                   放在这里而不是顶栏,理由:
+                     ① 顶栏在手机上本来就在横向溢出(用户要靠盲滑才能摸到右边的按钮),
+                        再塞一个按钮等于把问题做大 —— 这次改动的主体就是「顶栏不许溢出」;
+                     ② 手牌一览是手机上**唯一常驻可见**的整块面板(顶栏会被挤、操作条位置是
+                        算出来的、侧栏默认收起),它的标题行在手机上又是浮在公共牌行右端的
+                        (见 mobile.css),加一个按钮不占任何额外高度 ——
+                        这一点很关键:底栏每多 1px 都会从 3D 区里扣(这个仓库为底栏重叠
+                        和高度瓜分踩过好几次坑)。
+                   桌面上它也一起显示(标题行本来就是一行 flex),不做设备判断:
+                   少一套「只在某端出现」的分支,就少一处对不上的地方。
+                   ⚠️ id 必须是 btnExitGame,**不能**叫 btnExitHome ——
+                      playermode.mjs 里有一条断言钉住「抽屉专属的退出按钮没有泄漏到主界面」,
+                      查的正是 btnExitHome 这个 id,重名会把那条断言弄红。
+                   (这段注释在模板字符串里:**不要写反引号**,会把模板提前结束掉。) -->
+              <button class="btn btn--tiny btn--danger handstrip__exit" id="btnExitGame"
+                      title="结束当前牌局,回到主页重新选模式">↩<span class="handstrip__exitLabel"> 退出本局</span></button>
               <span class="handstrip__note" id="handStripNote"></span>
               <!-- 摊牌胜率的口径说明。
                    ⚠️ 不要复用 .handstrip__note 那一格:它在手机上被 display:none 掉了
@@ -120,7 +137,7 @@ export class SceneTable {
                    放在标题右侧、不占行高:胜率徽标加在每个人「名字」那一行里,
                    加高任何一行都会挤掉手机上的牌面。 -->
               <span class="handstrip__eqhint" id="handStripEq" hidden></span>
-              <button class="btn btn--tiny" id="btnHandStrip" title="收起 / 展开">收起</button>
+              <button class="btn btn--tiny" id="btnHandStrip" title="收起 / 展开"><span class="handstrip__toggleLabel">收起</span></button>
             </header>
             <!-- 公共牌单独来一份:桌面上是 3D 小模型,斜着看看不清牌面 -->
             <div class="handstrip__board" id="handStripBoard">
@@ -207,6 +224,7 @@ export class SceneTable {
       plates: q('platesEl'), bubble: q('bubbleEl'), pot: q('potEl'), potValue: q('potValue'),
       handStrip: q('handStrip'), handStripBody: q('handStripBody'),
       handStripNote: q('handStripNote'), handStripEq: q('handStripEq'), btnHandStrip: q('btnHandStrip'),
+      btnExitGame: q('btnExitGame'),
       boardRow: q('handStripBoard'), boardCards: q('boardCards'),
       boardStreet: q('boardStreet'), boardHint: q('boardHint'), btnReview: q('btnReview'),
       hint: q('hintEl'), toast: q('toastEl'), sidePanel: q('sidePanel'),
@@ -233,8 +251,13 @@ export class SceneTable {
     this.dom.btnHandStrip.addEventListener('click', () => {
       this.handStripOpen = !this.handStripOpen;
       this.dom.handStrip.classList.toggle('is-collapsed', !this.handStripOpen);
-      this.dom.btnHandStrip.textContent = this.handStripOpen ? '收起' : '展开';
+      this._syncHandStripLabel();
     });
+
+    // 「退出本局」:只通知外面。**这里不写任何退出流程** ——
+    // 抽屉里那个按钮、返回键、这一个入口共用 app.js 的同一套收尾
+    // (见 setup3d.requestExit 的注释)。
+    this.dom.btnExitGame?.addEventListener('click', () => this.hooks.onExitGame?.());
 
     this._loop = this._loop.bind(this);
     requestAnimationFrame(this._loop);
@@ -687,7 +710,11 @@ export class SceneTable {
   updateDealerInfo() { /* 荷官信息并进底部提示与侧栏脚注 */ }
 
   updateTopbar(view, info, streetText) {
+    // ⚠️ 第几手这个标签在极窄的竖屏(412px)上也可能被省略号截断,
+    //    所以同样要给 title —— 顶栏那几条「被截断必须有 title」的断言
+    //    会把没 title 的截断项直接判失败(实测抓过 handTag)。
     this.dom.handTag.textContent = `第 ${view.handNo} 手`;
+    this.dom.handTag.title = `第 ${view.handNo} 手`;
     // 盲注:两种升盲各自的进度都显示出来(第几档 / 本档已打多少手)
     let blind = `盲注 ${view.smallBlind} / ${view.bigBlind}`;
     if (view.bbAnte > 0) blind += ` · 大盲前注 ${view.bbAnte}`;
@@ -710,11 +737,12 @@ export class SceneTable {
     //     引擎里这条能力还在,万一配置里被置成非 0,顶栏也只是不显示,
     //     不会出现「顶栏说 10/10 手、盲注却翻了倍」这种对不上的显示。
     this.dom.blindTag.textContent = blind;
-    this.dom.blindTag.title = [
-      view.blindLevelUp
-        ? `升盲模式:每过 ${view.blindLevelHands} 手按档位表升一档(0 = 不按档位升盲;在设置里改)`
-        : '',
-    ].filter(Boolean).join('\n') || '盲注固定(可在设置里打开升盲模式并设置升盲周期)';
+    // ★ 手机上这一段会被省略号截断(mobile.css 里 .topbar__left 是可压缩的),
+    //   所以把**全文**塞进 title:截断只是不让它挤掉右边的按钮,信息本身不能丢。
+    //   (之前 title 里只有「升盲模式每 N 手升一档」这句设置说明,悬停看不到盲注数值。)
+    this.dom.blindTag.title = [blind, view.blindLevelUp
+      ? `升盲模式:每过 ${view.blindLevelHands} 手按档位表升一档(0 = 不按档位升盲;在设置里改)`
+      : '盲注固定(可在设置里打开升盲模式并设置升盲周期)'].join('\n');
     this.dom.deckTag.textContent = view.shortDeck ? '短牌 36 张' : '标准 52 张';
     this.dom.street.textContent = view.handOver ? '本手结束' : (streetText || view.streetLabel || '等待开局');
     this.dom.street.className = 'street street--' + (view.handOver ? 'over' : view.street);
@@ -803,6 +831,11 @@ export class SceneTable {
     document.body.classList.toggle('is-sidepanel-open', !!open);
   }
 
+  /** 侧栏是不是展开的(和 isHandStripCollapsed 对称:外面不该去读 DOM 的类名) */
+  isSidePanelOpen() {
+    return !this.dom.sidePanel.classList.contains('is-collapsed');
+  }
+
   /** 手牌一览是否已收起 */
   isHandStripCollapsed() {
     return this.dom.handStrip.classList.contains('is-collapsed');
@@ -813,7 +846,24 @@ export class SceneTable {
     if (this.isHandStripCollapsed() === collapsed) return;
     this.handStripOpen = !collapsed;
     this.dom.handStrip.classList.toggle('is-collapsed', collapsed);
-    this.dom.btnHandStrip.textContent = collapsed ? '展开' : '收起';
+    this._syncHandStripLabel();
+  }
+
+  /**
+   * 只改「收起 / 展开」两个字的**内层 span**。
+   *
+   * ⚠️ 千万别写 this.dom.btnHandStrip.textContent = …:那会把按钮里
+   *    <span class="handstrip__toggleLabel"> 整个抹掉,而手机上是靠这个 span
+   *    把文字收成图标的(见 mobile.css)—— 抹掉之后手机上会多出一段文字,
+   *    顶栏/手牌一览的宽度全跟着变。三个地方都在改这两个字,统一走这里。
+   */
+  _syncHandStripLabel() {
+    const b = this.dom.btnHandStrip;
+    if (!b) return;
+    const label = b.querySelector('.handstrip__toggleLabel');
+    const txt = this.handStripOpen ? '收起' : '展开';
+    if (label) label.textContent = txt;
+    else b.textContent = txt;
   }
 
   /**
@@ -939,6 +989,19 @@ export class SceneTable {
   setNextEnabled(on) {
     this.dom.btnNext.disabled = !on;
     this.dom.btnNext.classList.toggle('is-waiting', on);
+  }
+
+  /**
+   * 「退出本局」按钮的显隐。
+   *
+   * 为什么不能只靠「有 engine」这种隐式判断来显示它:
+   *   主页 / 设置页时牌桌上什么都还没有,这时候摆一个「退出本局」是自相矛盾的
+   *   (没有「本局」可退),点了也只是再回一次主页。
+   * 由 app.js 在**开局**与**退出**两处显式开关:那两个地方正好是「牌局是否存在」
+   * 的唯一真相来源,在这里自己猜状态迟早会和它对不上。
+   */
+  setExitEnabled(on) {
+    if (this.dom.btnExitGame) this.dom.btnExitGame.hidden = !on;
   }
 
   get seatsCount() { return this.plates.size; }

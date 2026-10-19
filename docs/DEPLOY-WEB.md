@@ -173,24 +173,58 @@ OLLAMA_ORIGINS=* ollama serve
 确认 `web/index.html` 里的 viewport meta 没被删掉 —— 删了之后
 浏览器会按 980px 虚拟视口渲染,所有东西都会缩小。
 
+**手机上切到后台再回来,牌局没了 / 刷新之后回到主页**
+牌局快照应该把它救回来。这条链路是三段拼起来的,任何一段坏了都会退化成「丢局」:
+
+| 段 | 在哪 | 坏了会怎样 |
+|---|---|---|
+| 打快照 + 节流写盘 | `src/core/gameStore.js`、`src/core/engine.js` 的 snapshot/restore | 一直没有存档 |
+| 存在哪 | 网页版 `src/shared/gameStorage.mjs` → localStorage(键 `poker-dealer/game/v1`);桌面版 `src/main/gameStore.cjs` → `userData/game.json` | 一端能续、另一端不能 |
+| 「继续上一局」入口 | `src/ui/home.js` + `src/ui/app.js` 的 `checkPendingSnapshot` | 有存档但主页不提示 |
+
+排查顺序:开发者工具 → Application → Local Storage,看有没有 `poker-dealer/game/v1`;
+有的话刷新页面看主页有没有出现「继续上一局(第 N 手)」。**被回收前那一次强存**
+走的是 `visibilitychange` / `pagehide`(`web/main.js` 与 `src/ui/app.js` 的
+`bindLifecycleSaves`),桌面版还会用同步 IPC —— 所以在桌面版上强存更可靠。
+
+**「添加到主屏幕」之后还是像书签(有地址栏 / 没有图标)**
+`manifest.json` 没被取到。构建脚本会在产物根目录放 `manifest.json`、`sw.js`
+和三个图标并校验它们存在;如果 Nginx/其它服务器只转发部分路径,注意别把根目录的
+`manifest.json` / `sw.js` 漏掉。浏览器要求 SW 的 Content-Type 是 JS,
+而且 `sw.js` **必须在根目录**(scope 默认就是它所在目录)。
+
+**改了前端代码,但手机上还是旧版本**
+见 `web/sw.js` 顶部的 `CACHE_VERSION`:app shell 走 network-first,所以常规改动
+下一次导航就会生效;而**素材**(立绘)走 cache-first + 后台刷新,要靠版本号推进。
+改完前端记得把 `CACHE_VERSION` 加一(注释里写了原因)。
+本地 `localhost` / `127.0.0.1` 是**故意不注册 SW** 的,免得调试时被缓存住。
+
 ---
 
 ## 七、相关文件
 
 | 路径 | 作用 |
 |---|---|
-| `web/index.html` | 浏览器版入口(含 viewport meta 与 CSP) |
-| `web/main.js` | 启动脚本(必须先装 pokerAPI 再启动应用) |
+| `web/index.html` | 浏览器版入口(含 viewport meta、CSP、manifest / apple-touch-icon) |
+| `web/main.js` | 启动脚本(先装 pokerAPI、注册 SW、再启动应用;含仅本机的调试入口) |
 | `web/pokerApi.js` | `window.pokerAPI` 的浏览器实现(对齐 Electron preload 的接口) |
+| `web/manifest.json` | PWA 清单(名称 / 图标 / standalone / 暖白配色) |
+| `web/sw.js` | Service Worker:app shell network-first,素材 cache-first,排除 API 请求 |
 | `web/mobile.css` | 移动端布局 |
 | `web/mobileLayout.js` | 手机上收起侧栏、动态对齐下注条 |
+| `src/core/gameStore.js` | 对局快照的存取逻辑(节流 / 版本丢弃,两端共用同一份) |
+| `src/shared/gameStorage.mjs` | 快照的存储适配器(桌面 IPC 优先,否则 localStorage) |
+| `src/main/gameStore.cjs` | 桌面版的快照文件读写(`userData/game.json`) |
+| `tools/pwaicons.mjs` | PWA 图标生成器(纯 Node 光栅化 + PNG 编码,**不引入二进制素材**) |
 | `worker/src/index.js` | Worker:静态资源 + LLM 转发 |
 | `worker/wrangler.toml` | Cloudflare 配置 |
 | `src/shared/providers.mjs` | 厂商表(**唯一真源**,前端/Worker/桌面端共用) |
 | `src/shared/llmStream.mjs` | 请求构造 + SSE 解析(**唯一真源**) |
-| `tools/buildweb.mjs` | 构建前端(复制 + 校验路径) |
+| `tools/buildweb.mjs` | 构建前端(复制 + 生成图标 + 校验路径/清单/产物) |
 | `tools/buildworker.mjs` | 构建 Worker(复制共享模块 + 校验) |
 | `tools/webserve.mjs` | 本地静态服务器(仅开发用) |
+| `tools/snapshotest.mjs` | 对局快照 + PWA 静态校验(纯 Node,不开窗口) |
+| `tools/pwaverify.mjs` | 真浏览器验收(Chrome headless 一次性跑法,不开窗口) |
 
 ---
 
@@ -203,6 +237,18 @@ npm run web:serve         # 另开一个终端,浏览器打开 http://127.0.0.1:
 
 在页面上走一遍:选模式 → 填 Key → 开局 → 看 AI 是否正常出牌与显示思考。
 部署之后把地址发到手机上,确认横屏能正常操作。
+
+自动化的两条(都不需要开 Electron 窗口):
+
+```bash
+node tools/snapshotest.mjs   # 对局快照(round-trip / 续玩 / 节流 / 两端一致)+ PWA 静态校验
+node tools/pwaverify.mjs     # 真浏览器(Chrome headless)验启动、续玩入口、恢复、PWA 资源
+```
+
+`pwaverify.mjs` 借用了 `web/main.js` 里两个**只在本机生效**的调试参数
+(`?snap=1` 造一份存档、`?resume=1` 点「继续上一局」、`?drop=1` 点「放弃」)——
+因为 headless 一次性跑法不能交互,只能把动作交给页面自己做。
+线上不会走到那条分支(有 hostname 判断),所以不会覆盖用户的真实存档。
 
 > 如果模型这条链路有问题,先看浏览器的 Network 面板里 `/api/llm` 的返回 ——
 > 最常见的两种是 **Key 没填**(401)和 **Worker 没配 ALLOWED_ORIGINS**(403)。

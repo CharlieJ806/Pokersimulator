@@ -30,7 +30,47 @@ const MODES = [
   },
 ];
 
-export function createHome(root, { onPick, onModels } = {}) {
+const STREET_TEXT = {
+  idle: '还没开局', preflop: '翻牌前', flop: '翻牌圈', turn: '转牌圈', river: '河牌圈', showdown: '摊牌',
+};
+
+/** 存档时间的口语化说法:手机上看「3 分钟前」比一串时间戳有用得多 */
+function agoText(ts) {
+  if (!ts) return '';
+  const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
+  if (s < 60) return '刚刚';
+  if (s < 3600) return `${Math.round(s / 60)} 分钟前`;
+  if (s < 86400) return `${Math.round(s / 3600)} 小时前`;
+  return `${Math.round(s / 86400)} 天前`;
+}
+
+/**
+ * 「继续上一局」那一块的 HTML。
+ *
+ * 为什么放在主页**显眼**的位置、而且必须由用户点:
+ *   手机浏览器/PWA 一进后台就可能被系统回收,回来时页面等于重新加载。
+ *   如果静默恢复成牌桌,用户会以为「我刚才在看主页,怎么突然进了牌局」;
+ *   而直接丢掉又等于白打。所以给两个明确的入口:**继续**或**放弃**。
+ * 默认 display:none —— 没有存档时它不该占任何位置(showResume 里才打开)。
+ */
+function resumeBarHtml() {
+  return `
+      <div class="home__resume" id="homeResume" hidden>
+        <div class="home__resumeHead">
+          <span class="home__resumeIcon" aria-hidden="true">↻</span>
+          <div>
+            <div class="home__resumeTitle">发现上一局存档</div>
+            <div class="home__resumeSub" id="homeResumeSub"></div>
+          </div>
+        </div>
+        <div class="home__resumeBtns">
+          <button class="btn btn--primary" id="homeResumeGo">继续上一局</button>
+          <button class="btn btn--ghost" id="homeResumeDrop">放弃</button>
+        </div>
+      </div>`;
+}
+
+export function createHome(root, { onPick, onModels, onResume, onDiscard } = {}) {
   const el = document.createElement('div');
   el.className = 'setup home';
   el.innerHTML = `
@@ -60,6 +100,8 @@ export function createHome(root, { onPick, onModels } = {}) {
           </button>`).join('')}
       </div>
 
+      ${resumeBarHtml()}
+
       <div class="setup__foot">
         <div class="setup__footInfo">${window.pokerAPI?.isWeb
     ? '模型请求经同源 Worker 转发,API Key 只存在这个浏览器的本地存储里。'
@@ -82,6 +124,8 @@ export function createHome(root, { onPick, onModels } = {}) {
 
   const q = (s) => el.querySelector(s);
   let closeTimer = null;
+  // 「继续上一局」按钮要交回去的那份快照(由 showResume 的第二个参数填)
+  let resumeSnapshot = null;
 
   el.querySelectorAll('.modecard').forEach((card) => {
     card.addEventListener('click', () => {
@@ -94,6 +138,58 @@ export function createHome(root, { onPick, onModels } = {}) {
   // 开局前也能配模型。**不关主页** —— 关掉的话用户配置完还得重新找入口;
   // 模型面板是盖在最上层的抽屉,回车/保存后回到主页正好接着选模式。
   q('#homeModels')?.addEventListener('click', () => onModels?.());
+
+  /* ------------------------------------------------ 继续上一局(对局快照) */
+
+  /**
+   * 显示「继续上一局(第 N 手)」。第二个参数是快照本体,点「继续」时原样交回去。
+   *
+   * ⚠️ 这里**只负责显示与暂存** —— 快照的解析/校验/丢弃全在 GameApp 那边
+   *    (core/gameStore.js 与 engine.validateSnapshot)。主页不重复实现一遍校验,
+   *    否则「主页认为能用、引擎认为不能用」这种分歧迟早出现。
+   * @param {{handNo:number, street:string, handOver:boolean, players:number, savedAt:number}} info
+   * @param {object} [snap] 原样的快照对象
+   */
+  function showResume(info, snap) {
+    const bar = q('#homeResume');
+    if (!bar || !info) return;
+    if (snap) resumeSnapshot = snap;
+    const sub = q('#homeResumeSub');
+    if (sub) {
+      const parts = [
+        `第 ${info.handNo} 手`,
+        STREET_TEXT[info.street] || info.street || '',
+        info.players ? `${info.players} 人` : '',
+        agoText(info.savedAt),
+      ].filter(Boolean);
+      sub.textContent = parts.join(' · ');
+    }
+    bar.hidden = false;
+    bar.classList.add('is-open');
+  }
+
+  function hideResume() {
+    const bar = q('#homeResume');
+    if (!bar) return;
+    bar.hidden = true;
+    bar.classList.remove('is-open');
+    // 顺手把快照引用放掉:留着的话「放弃」之后它还在内存里,
+    // 下次 showResume 忘了传第二个参数就会拿着旧快照恢复
+    resumeSnapshot = null;
+  }
+
+  q('#homeResumeGo')?.addEventListener('click', () => {
+    const bar = q('#homeResume');
+    if (bar) bar.hidden = true;     // 先收起来:恢复失败时也不会留一个点不动的按钮
+    const snap = resumeSnapshot;
+    // ⚠️ 这里**不调 hide()**:恢复要先把牌桌建起来,由 GameApp 决定什么时候收主页。
+    //    提前收掉的话,恢复失败(存档损坏)就会停在一片空白上。
+    onResume?.(snap);
+  });
+  q('#homeResumeDrop')?.addEventListener('click', () => {
+    hideResume();
+    onDiscard?.();
+  });
 
   function showSoon(card) {
     let note = card.querySelector('.modecard__note');
@@ -125,5 +221,19 @@ export function createHome(root, { onPick, onModels } = {}) {
     clearTimeout(closeTimer);
   }
 
-  return { show, hide, el, isOpen: () => el.classList.contains('is-open') };
+  return {
+    show,
+    hide,
+    el,
+    isOpen: () => el.classList.contains('is-open'),
+    /**
+     * 「继续上一局」那一块的显隐。
+     * ⚠️ 必须由 GameApp 显式调这两下,别在这里自动读存储:
+     *    读存档要经过版本校验与「坏档就丢」的处理,那些逻辑在
+     *    core/gameStore.js + engine.validateSnapshot 里只有一份,
+     *    主页再写一遍必然出现两条判据不一致的情况。
+     */
+    showResume,
+    hideResume,
+  };
 }

@@ -127,6 +127,36 @@ function toInt(value) {
   return Number.isFinite(v) ? v : NaN;
 }
 
+/* ------------------------------------------------------------------ 快照 */
+/**
+ * 对局快照的**格式版本**。
+ *
+ * ⚠️ 改动 state 的字段结构(删字段 / 改字段含义 / 加一个 restore 必须依赖的字段)时
+ *    必须把这个数字 +1。读取方(gameStore)看到版本不一致就**直接丢弃旧快照**,
+ *    不做任何「尽力而为」的字段迁移:
+ *      · 快照是**临时状态**,丢了只损失一局的进度;而按新代码去解释旧结构,
+ *        轻则筹码算错、重则 restore 直接抛错把启动流程搞崩;
+ *      · 配置那边已经有同一套规矩(stripLegacyKeys 只删键、不迁移数值),这里保持一致。
+ * 版本号的推导参考:1 = 首个落盘版本(handNo/street/blindLevelHands/handDeltas 全在)。
+ */
+export const SNAPSHOT_VERSION = 1;
+
+/** 快照里**不允许**出现的字段(见 PokerEngine#snapshot 的说明) */
+const SNAPSHOT_DROP = new Set(['_score', '_handName']);
+
+/**
+ * 合法的牌。
+ *
+ * ⚠️ 牌是 **0..51 的整数**(见 cards.js:rank = (id>>2)+2,suit = id&3),
+ *    **不是** 'As' 这样的字符串 —— 写这个校验时最容易想当然写错的就是这一条。
+ * 非整数 / 负数 / 超过 51 都直接判非法:那意味着快照里的牌不是这一套编码
+ * (旧结构、手工改过的文件、或者哪天编码换了),拿它去发牌会在**摊牌那一刻**
+ * 才炸(handEval 按位运算取 rank/suit,越界值静默算错),离现场太远。
+ */
+function isCardLike(c) {
+  return typeof c === 'number' && Number.isInteger(c) && c >= 0 && c <= 51;
+}
+
 /**
  * 把界面上来的「每 N 手升一档」夹成合法值。
  *
@@ -265,11 +295,178 @@ class PokerEngine {
     };
   }
 
+  /* ------------------------------------------------------------------ 对局快照 */
+
+  /**
+   * 把当前**牌局状态**打成可 JSON 往返的快照。
+   *
+   * ── 为什么要有这个(踩过的坑)────────────────────────────────────────
+   * 手机上浏览器一进后台就可能被系统回收,刷新 / 回收都会让内存里的 state 全丢,
+   * 打了 20 手的一局直接归零。要能「接着上一局打」,状态就必须能落盘。
+   *
+   * ── state 能不能直接 JSON.stringify ────────────────────────────────
+   * 逐字段查过(见 tools/snapshotest.mjs 的形态扫描),结论:
+   *   · **没有** Map / Set / 循环引用 / 函数挂在 state 上。
+   *     `_showdown()` 里那个 `new Map()`(约 1196 行的 payouts)是**局部变量**,
+   *     分完池就没了,不进 state;
+   *   · 牌是字符串('As' / 'Td',见 cards.js),不是类实例;
+   *   · 唯一需要处理的是两个**内部评分残留**:
+   *       - p._score    :handEval 的返回值对象。_showdown() 给每个摊牌者挂上,
+   *                       本来由 _finishHand() 用 delete 清掉。落到盘上没有意义
+   *                       (restore 之后不会被复用),而且它是「库内部结构」——
+   *                       哪天 handEval 改成带方法/带循环的对象,快照就会静默变坏。
+   *       - p._handName :跟着 _score 走的成牌名,同样在 _finishHand 里删。
+   *     所以快照里统一剔除,restore 也不会把它们放回来:
+   *     restore 出来的局面只可能是「一手已结算」或「一手进行中」,
+   *     这两种情况下引擎自己都不需要 _score(摊牌时的评分是当场重算的)。
+   *   · 另外 handNo/street/actor/pending 这些是**读数**,必须原样留住,
+   *     否则恢复出来会「牌是这一手的、行动顺序是下一手的」。
+   *
+   * @returns {{v:number, savedAt:number, progress:object, settings:object, state:object}}
+   */
+  snapshot() {
+    return {
+      v: SNAPSHOT_VERSION,
+      savedAt: Date.now(),
+      // 界面用的一点点元信息:不用先反序列化整局就能显示「继续上一局(第 N 手)」。
+      // ⚠️ 它只是**索引**,不是真源 —— restore 一律以 state 为准,
+      //    免得出现「标题写第 12 手、牌桌是第 11 手」这种对不上的画面。
+      progress: {
+        handNo: this.state.handNo | 0,
+        street: this.state.street,
+        handOver: !!this.state.handOver,
+        humanSeat: this.state.humanSeat ?? null,
+        players: this.state.players.length,
+      },
+      // settings 也要存:它是「下一手开始时用的值」——blindUpEvery / blindLevelHands
+      // 允许牌局进行中改(setBlindUpEvery),只存 state 的话恢复后
+      // startHand() 会读到构造时的旧 settings,把刚调好的节奏悄悄撤回去。
+      settings: JSON.parse(JSON.stringify(this.settings)),
+      state: JSON.parse(JSON.stringify(this.state, (key, value) => (
+        SNAPSHOT_DROP.has(key) ? undefined : value
+      ))),
+    };
+  }
+
+  /**
+   * 反序列化一个快照,得到一份**可以直接塞进 state 的纯数据**。
+   * 不合法(版本不符 / 结构坏 / 牌不是字符串)时抛错并给出人话原因 ——
+   * 调用方(gameStore)据此丢弃快照,而不是把坏数据灌进引擎。
+   *
+   * 为什么做成 static:恢复要发生在「还没有引擎实例」的时候(启动时先验证快照再决定
+   * 要不要建引擎),所以校验不能依赖实例。
+   *
+   * @param {any} snap
+   * @returns {{state:object, settings:object, progress:object}}
+   */
+  static validateSnapshot(snap) {
+    const fail = (why) => { throw new Error(`对局快照不可用:${why}`); };
+    if (!snap || typeof snap !== 'object') fail('不是对象');
+    if (snap.v !== SNAPSHOT_VERSION) fail(`版本不匹配(快照 v${snap.v},当前 v${SNAPSHOT_VERSION})`);
+    const st = snap.state;
+    if (!st || typeof st !== 'object') fail('缺少 state');
+    if (!Array.isArray(st.players) || st.players.length < 2) fail('players 缺失或不足 2 人');
+    if (!Number.isFinite(st.handNo) || st.handNo < 0) fail(`handNo 非法(${st.handNo})`);
+    if (typeof st.street !== 'string') fail('street 非法');
+    if (!Array.isArray(st.deck)) fail('deck 非法');
+    if (st.pot !== undefined && !Number.isFinite(st.pot)) fail(`pot 非法(${st.pot})`);
+    if (!Number.isFinite(st.smallBlind) || !Number.isFinite(st.bigBlind)) fail('盲注非法');
+
+    // 牌必须是 0..51 的整数 / null(理由见 isCardLike)。
+    // 顺手查**重复**:同一张牌出现在两处是「快照被改坏」最典型的形态,
+    // 而且它造成的是「多出一张不存在的牌」这种很难从现象倒推的错。
+    //
+    // ⚠️ 只有 p.inHand 的玩家才算「这一手发了牌」。被淘汰的人手里留着的是
+    //    **上一手的旧牌**(见 _finishHand 的注释:底牌一直留到 startHand 才清),
+    //    把它们也算进来的话,总数会凭空多出十几张 —— 这是写这个校验时最容易踩的坑。
+    const allCards = [...st.deck, ...(st.board || []), ...((st.burned) || [])];
+    const inHandCards = [];
+    for (const p of st.players) {
+      if (!Array.isArray(p.hole)) continue;
+      if (!p.inHand) continue;                          // 上一手留下的旧牌,不属于当前牌堆
+      for (const c of p.hole) if (c !== null && c !== undefined) inHandCards.push(c);
+    }
+    allCards.push(...inHandCards);
+    const seenCard = new Set();
+    for (const c of allCards) {
+      if (c === null || c === undefined) continue;
+      if (!isCardLike(c)) fail(`牌的数据不是 0..51 的整数:${JSON.stringify(c)}`);
+      if (seenCard.has(c)) fail(`同一张牌在快照里出现了两次(id=${c})`);
+      seenCard.add(c);
+    }
+    // 牌堆 + 公共牌 + 烧牌 + 在场玩家的底牌 = 整副牌(52 / 短牌 36)。
+    // 只在**一手进行中**成立;空闲局面(street='idle')牌堆是空的,跳过。
+    if (st.street !== 'idle') {
+      const expect = st.shortDeck ? 36 : 52;
+      if (allCards.length !== expect) {
+        fail(`牌数不对:${allCards.length} 张(${st.shortDeck ? '短牌' : '标准'}应该是 ${expect} 张)`
+          + ` —— 牌堆 ${st.deck.length} + 公共牌 ${(st.board || []).length}`
+          + ` + 烧牌 ${(st.burned || []).length} + 在场底牌 ${inHandCards.length}`);
+      }
+    }
+    // 玩家关键字段:缺一个都会让后续逻辑算出 NaN 筹码
+    for (const p of st.players) {
+      if (!Number.isFinite(p.stack)) fail(`座位 ${p.seat} 的 stack 非法(${p.stack})`);
+      if (!Number.isFinite(p.committed)) fail(`座位 ${p.seat} 的 committed 非法(${p.committed})`);
+      if (!Array.isArray(p.hole) || p.hole.length !== 2) fail(`座位 ${p.seat} 的 hole 非法`);
+    }
+    if (st.actor !== null && st.actor !== undefined
+      && (!Number.isInteger(st.actor) || st.actor < 0 || st.actor >= st.players.length)) {
+      fail(`actor 越界(${st.actor})`);
+    }
+    if (st.button !== null && st.button !== undefined
+      && (!Number.isInteger(st.button) || st.button < -1 || st.button >= st.players.length)) {
+      fail(`button 越界(${st.button})`);
+    }
+    if (!Array.isArray(st.pending)) fail('pending 非法');
+
+    const state = JSON.parse(JSON.stringify(st, (key, value) => (
+      SNAPSHOT_DROP.has(key) ? undefined : value
+    )));
+    const settings = snap.settings && typeof snap.settings === 'object'
+      ? JSON.parse(JSON.stringify(snap.settings)) : null;
+    return { state, settings, progress: snap.progress || null };
+  }
+
+  /**
+   * 用快照覆盖当前状态。返回 true 表示成功。
+   *
+   * 为什么要「覆盖一个已存在的引擎」而不是让调用方 new 一个新的:
+   *   界面层(table / agents / personaMap)全都抓着 this.engine 这个引用,
+   *   换实例等于把已经建好的 3D 牌桌、AI 实例全部作废。原地恢复最省事,
+   *   也避免「旧循环还在跑、抓着旧引擎」这类时序坑。
+   *
+   * ⚠️ settings 用**合并**(而不是整体替换):DEFAULT_SETTINGS 里后来新加的键,
+   *    老快照里没有,合并能让它们拿到默认值而不是 undefined。
+   */
+  restore(snap) {
+    const { state, settings } = PokerEngine.validateSnapshot(snap);
+    if (settings) this.settings = { ...this.settings, ...settings };
+    this.state = state;
+    return true;
+  }
+
   /* ------------------------------------------------------------------ 工具 */
 
   get activePlayers() { return this.state.players.filter((p) => p.inHand && !p.folded); }
   get livePlayers() { return this.state.players.filter((p) => p.inHand && !p.folded && !p.allIn); }
   get seatedPlayers() { return this.state.players.filter((p) => p.stack > 0 || p.inHand); }
+
+  /**
+   * 「牌局状态变了」的通知钩子 —— 只有一个用途:**自动保存快照**。
+   *
+   * 为什么由引擎来通知,而不是让界面在每处调用点自己记得存:
+   *   会改变牌局状态的入口不止一个(发一手、每家行动、摊牌结算、中途改升盲节奏),
+   *   界面层漏掉任何一个,用户看到的就是「这一步之后刷新会退回上一步」——
+   *   而这种丢帧式的丢失极难复现。挂在引擎内部,漏不掉。
+   *
+   * ⚠️ 回调必须是**廉价且不抛错**的:它每手会被触发几十次(每次行动一次),
+   *    而节流是**回调那边**的责任(onState → gameStore 的 2 秒节流)。
+   *    这里不 await、也不关心返回值 —— 保存失败绝不能影响牌局。
+   */
+  _touch() {
+    try { this.onState?.(this); } catch { /* 保存出问题不能影响打牌 */ }
+  }
 
   _log(text, kind = 'info', extra = null) {
     this.state.log.push({ handNo: this.state.handNo, street: this.state.street, text, kind, extra, at: Date.now() });
@@ -773,6 +970,8 @@ class PokerEngine {
     // 翻前行动:单挑时按钮位(小盲)先动,多人时大盲左侧先动
     const first = headsUp ? sbSeat : this._nextSeat(bbSeat + 1, (p) => p.inHand);
     this._beginRound(first, { preflop: true });
+    // 每手**开始**就存一次:此时底牌已发好、盲注已下,是最干净的恢复点
+    this._touch();
     return this.viewForDealer();
   }
 
@@ -983,6 +1182,9 @@ class PokerEngine {
     if (st.currentBet > wasCurrentBet) this._rebuildPending(seat);
 
     this._advanceActor();
+    // 每次行动之后都通知一次(真正落盘的频率由调用方的节流决定):
+    // 摊牌/收池都在 _advanceActor 里被触发,所以这一处同时覆盖了「行动」与「结算」。
+    this._touch();
     return this.viewForDealer();
   }
 
@@ -1293,6 +1495,9 @@ class PokerEngine {
     // 记下这一手的「公开摘要」,给 AI 的记性用(跨手保留)。
     // 必须在 onHandEnd 之前 —— 写读人笔记是那个回调里触发的。
     this._captureHandDelta();
+    // 摊牌结算之后立刻存一次:此刻 _score / _handName 还没被删,
+    // 但 snapshot() 会把它们剔掉,所以存下来的是干净局面。
+    this._touch();
     this.onHandEnd?.(st.lastResult);
   }
 

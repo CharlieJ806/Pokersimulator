@@ -13,6 +13,14 @@
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <!-- PWA:manifest 提供 installability(display:standalone)+ 图标 + 名称。
+       ⚠️ 有了它之后「加到主屏幕」才是一个真正的 App,而不是一个书签快捷方式。
+       路径是**构建产物里的**相对路径(产物根目录就是 web/dist)。 -->
+  <link rel="manifest" href="manifest.json">
+  <!-- iOS 不读 manifest 里的 icons,只认 apple-touch-icon 这个 link。
+       图标不是二进制素材:构建期由 tools/pwaicons.mjs 现场生成(见 buildweb.mjs 第 6 步)。 -->
+  <link rel="apple-touch-icon" href="icon-180.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
 
   <title>德州扑克模拟器 · Poker Simulator</title>
 
