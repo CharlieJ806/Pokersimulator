@@ -475,10 +475,7 @@ export class UndercoverKernel {
     }
 
     if (st.round >= st.config.rounds) {
-      // 轮次用尽:按「卧底有没有撑到人数阈值」判(研究文档:超时按人数判定)
-      const alive = st.alive.filter(Boolean).length;
-      if (alive <= winThreshold(st.config.seats)) this._end('undercover', 'rounds');
-      else this._end('civilian', 'rounds');
+      this._endByRounds();
       record.winner = st.winner;
       return record;
     }
@@ -486,6 +483,61 @@ export class UndercoverKernel {
     st.round += 1;
     this._startRound();
     return record;
+  }
+
+  /**
+   * 轮次用尽 → 按「卧底有没有撑到人数阈值」判终局(研究文档:超时按人数判定)。
+   *
+   * 单独抽出来是给 repairTurn 复用的:结算中途被打断(进程退出 / 存档停在 reveal)
+   * 之后要能走同一个出口。规则只有这一份 —— 两处各写一遍迟早漂移。
+   */
+  _endByRounds() {
+    const alive = this.state.alive.filter(Boolean).length;
+    if (alive <= winThreshold(this.state.config.seats)) this._end('undercover', 'rounds');
+    else this._end('civilian', 'rounds');
+    return this.state.winner;
+  }
+
+  /**
+   * 「回合推进卡住了」的**确定性修复**。runner 在发现「状态没往前走」时调它。
+   *
+   * 为什么需要:三种情况会让 runner 的 for(;;) 永远等不到下一步 ——
+   *
+   *   · `phase === 'reveal'`:投票结算的中间态。正常 <1ms 就离开了,但如果进程
+   *     **正好死在那一刻**(关窗口 / 浏览器崩),存档里就会留下一个 reveal。
+   *     恢复之后 runner 只认识 describe/vote/end,于是当场抛「意外阶段」——
+   *     用户看到的就是「上一轮打完了,下一轮永远不开」。
+   *   · `phase === 'describe'` 却没有当前发言者(order 空 / orderIdx 越界):
+   *     快照结构合法但语义坏掉时会出现。原代码是 `continue`,那就是**死转**。
+   *   · `phase === 'vote'` 但没有待投的人:票已经记满却没结算(同样来自坏存档)。
+   *
+   * 修复原则:**绝不猜结果**。reveal 一律按「本轮无人出局」收尾(不重复淘汰、
+   * 不重算票),describe 空着就直接进投票,vote 满了就结算。这样即使存档是坏的,
+   * 局也能走到一个**规则允许的**终局,而不是永远停在那儿。
+   *
+   * @returns {string|null} 修了什么(给 runner 广播 repair 事件);无事可修返回 null
+   */
+  repairTurn() {
+    const st = this.state;
+    if (st.phase === 'end') return null;
+    if (st.phase === 'reveal') {
+      // 结算被打断:当作「本轮已结算、无人出局」继续推进(幂等,不重算票)
+      this._log(st.round, 'repair', '结算被打断,按「本轮无人出局」继续');
+      if (st.round >= st.config.rounds) this._endByRounds();
+      else { st.round += 1; this._startRound(); }
+      return 'reveal';
+    }
+    if (st.phase === 'describe' && this.currentSpeaker() === null) {
+      this._log(st.round, 'repair', '描述轮没有当前发言者,直接进投票');
+      st.phase = 'vote';
+      return 'describe';
+    }
+    if (st.phase === 'vote' && !this.pendingVoters().length) {
+      this._log(st.round, 'repair', '投票轮票已记满却没有结算,补一次结算');
+      this._settleVote();
+      return 'vote';
+    }
+    return null;
   }
 
   _end(winner, reason) {

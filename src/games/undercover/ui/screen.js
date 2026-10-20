@@ -34,6 +34,7 @@ import { createKernel, normalizeGuess } from '../engine/kernel.js';
 import { buildRenderView, buildTableViewModel, buildScoreResult } from '../view.js';
 import { UndercoverRunner } from '../runner.js';
 import { createUndercoverStore } from '../store.js';
+import { RoundGate, ROUND_HOLD_MS } from '../../../shared/roundGate.mjs';
 import { createScoreboard, rankingHtml, matchSummary as matchSummaryOf } from '../scoring.js';
 import { assignPersonas } from '../personas.js';
 import { cleanSay, checkSayLeak, neutralSay } from '../filter.js';
@@ -94,6 +95,17 @@ export class UndercoverScreen {
     this._humanResolve = null;
     this.destroyed = false;
     /**
+     * 回合之间的闸门(自动停顿 1.4s + 暂停/单步)。
+     * 为什么放在屏幕这一层持有:一局重开/恢复时它要跟着新的 AbortSignal 重置,
+     * 而「暂停」是观看者的一次性意图,不该跨局保留 —— 屏幕的生命周期正好对上。
+     */
+    this.roundGate = new RoundGate({
+      holdMs: ROUND_HOLD_MS,
+      onChange: (s) => this._paintPace(s),
+    });
+    /** 正在回合边界上(「第 N 轮结束 → 第 N+1 轮开始」),_render 用它覆盖轮次标签 */
+    this._roundEnd = null;
+    /**
      * 这一场的最终排名是否已经交给平台记过分。
      * 为什么要有这个闸:退出本局会走 handleExit → onExitHome → 宿主的 exitToHome
      * → 宿主再调 stopGame,最后 unmount 还会 destroy —— **同一次退出有三条路**。
@@ -114,6 +126,7 @@ export class UndercoverScreen {
             <span class="uc__tag uc__tag--phase" id="ucPhaseTag"></span>
           </div>
           <div class="uc__topBtns">
+            <button class="btn btn--ghost" id="ucBtnPace" title="暂停在回合边界上,一回合一看"><span class="uc__paceIcon">⏸</span><span class="uc__paceLabel"> 暂停</span></button>
             <button class="btn btn--ghost" id="ucBtnModels">🤖 模型</button>
             <button class="btn btn--ghost" id="ucBtnSetup">⚙ 设置</button>
             <button class="btn btn--ghost" id="ucBtnExit">↩ 退出本局</button>
@@ -217,6 +230,7 @@ export class UndercoverScreen {
       lobby: q('ucLobby'), lobbySub: q('ucLobbySub'), lobbyNote: q('ucLobbyNote'),
       seats: q('ucSeats'), under: q('ucUnder'), blank: q('ucBlank'), rounds: q('ucRounds'), diff: q('ucDiff'),
       start: q('ucStart'), resume: q('ucResume'),
+      pace: q('ucBtnPace'),
       rank: q('ucRank'), lobbyRank: q('ucLobbyRank'),
     };
     this.personaMap = new Map();
@@ -255,6 +269,7 @@ export class UndercoverScreen {
     q('ucBtnModels')?.addEventListener('click', () => this.hooks.onModels?.());
     q('ucBtnSetup')?.addEventListener('click', () => this.showLobby(this.mode));
     q('ucBtnExit')?.addEventListener('click', () => this.handleExit());
+    q('ucBtnPace')?.addEventListener('click', () => this._onPaceClick());
     this.dom.start?.addEventListener('click', () => { this._startNew(); });
     this.dom.resume?.addEventListener('click', () => this._resume());
     q('ucModels')?.addEventListener('click', () => this.hooks.onModels?.());
@@ -494,12 +509,18 @@ export class UndercoverScreen {
     this.table.buildSeats(seats);
     this._render();
 
+    // ★ 换了一局就换一个信号:上一局还挂着的「暂停」不能带到新一局(否则一开就停住)
+    this._roundEnd = null;
+    this.roundGate.reset({ holdMs: ROUND_HOLD_MS, signal: this._abort.signal });
+    this._paintPace();
+
     this.runner = new UndercoverRunner({
       kernel,
       agents: this.agents,
       human,
       delayMs: Number(this._configValues().speakDelayMs) || 0,
       signal: this._abort.signal,
+      roundGate: this.roundGate,
       // ★ 本场积分榜的公开快照 —— 提示词里的【你的最终目标】要用它。
       //   只有 seat / name / 积分(这张榜本来就画在界面上,是公开信息);
       //   别人的词 / 阵营不在里面,也从这里进不去提示词。
@@ -531,10 +552,55 @@ export class UndercoverScreen {
   _teardownRun() {
     try { this.runner?.stop(); } catch { /* 忽略 */ }
     try { this._abort?.abort(); } catch { /* 忽略 */ }
+    // 闸门里可能正挂着一次「等下一回合」—— 不放掉的话退出本局的 await 会留在那儿
+    try { this.roundGate?.clear(); } catch { /* 忽略 */ }
+    this._roundEnd = null;
     this.runner = null;
     this._abort = null;
     this.running = false;
     this._resolveHuman(null);
+  }
+
+  /* ============================================================ 节奏控制 */
+
+  /**
+   * 「暂停 / 下一回合 / 继续」—— 一个按钮三种含义,按闸门当前状态决定。
+   *
+   * 为什么要它:观看模式下 6 个人一轮要几十秒,想停下来看看上帝面板、
+   * 或者纯粹想让「结果」多停一会儿,原来只能干瞪眼。三种状态刻意**不叠加**:
+   *   · 没暂停        → 点一下 = 暂停(停在下一个回合边界上)
+   *   · 暂停且没停在边界 → 点一下 = 继续(恢复自动推进)
+   *   · 暂停且停在边界   → 点一下 = 放行**这一轮**;再点一下才会放下一轮
+   * 最后这一条就是「幂等」:连点两下不会跳两轮 —— 闸门里只有一份等待,
+   * 第二下在没人等待时是空操作(见 shared/roundGate.mjs 的注释与测试),
+   * 界面上再加一道 350ms 去抖(见下面),把「手抖点两下」也挡住。
+   */
+  _onPaceClick() {
+    const g = this.roundGate;
+    if (!g) return;
+    // 连点两下 = 一下:第二下如果变成「继续」,就会把「暂停」整个取消掉,
+    // 在用户看来就是「点了两下下一回合,结果一路跑过去了」。350ms 内的重复点击直接忽略。
+    const now = Date.now();
+    if (now - (this._paceAt || 0) < 350) return;
+    this._paceAt = now;
+    if (!g.paused) { g.pause(); this.toast('已暂停:下一回合边界会停住', 'info', 1800); }
+    else if (g.waiting) { g.step(); }
+    else { g.resume(); this.toast('继续', 'info', 1200); }
+    this._paintPace();
+  }
+
+  /** 按钮文案跟着闸门状态走(暂停中停在边界 → 「下一回合」) */
+  _paintPace(state = this.roundGate?.state) {
+    const btn = this.dom?.pace;
+    if (!btn) return;
+    const s = state || { paused: false, waiting: false };
+    const icon = btn.querySelector('.uc__paceIcon');
+    const label = btn.querySelector('.uc__paceLabel');
+    if (icon) icon.textContent = !s.paused ? '⏸' : (s.waiting ? '⏭' : '▶');
+    if (label) label.textContent = !s.paused ? ' 暂停' : (s.waiting ? ' 下一回合' : ' 继续');
+    btn.title = !s.paused ? '暂停在回合边界上,一回合一看'
+      : (s.waiting ? '放行这一轮(下一回合)' : '继续自动推进');
+    btn.classList.toggle('is-armed', !!(s.paused && s.waiting));
   }
 
   /* ============================================================ 事件 */
@@ -611,6 +677,27 @@ export class UndercoverScreen {
       case 'round':
         this._log(`第 ${ev.round} 轮开始`, 'ok');
         this._persist();
+        break;
+      case 'roundEnd': {
+        // ★ 回合边界。轮次已经在**内核**里 +1 了,所以这里要同时说清「结束的是哪一轮」。
+        //   不这么说的话,观众看到的就是标签悄悄从 2 跳成 3 —— 像卡了一下又突然变了。
+        this._roundEnd = ev;
+        this._log(`第 ${ev.round} 轮结束 → 第 ${ev.next} 轮开始${ev.eliminated?.length
+          ? `(${ev.eliminated.map(seatLabel).join('、')} 出局)` : '(平票,无人出局)'}`, 'ok');
+        this.toast(`第 ${ev.round} 轮结束 → 第 ${ev.next} 轮开始`, 'ok', 2200);
+        this._persist();
+        break;
+      }
+      case 'roundStart':
+        this._roundEnd = null;
+        break;
+      case 'stepError':
+        // 一步没问出来(模型炸/解析失败)—— 降级继续,但要让现场记录里看得见,
+        // 否则观众只会觉得「它这轮怎么说了句废话」。
+        this._log(`⚠ ${seatLabel(ev.seat)} 这一步没问出来(${ev.step}),已降级继续:${ev.message}`, 'warn');
+        break;
+      case 'repair':
+        this._log(`⚠ 状态自相矛盾(${ev.why}),已修复:${ev.fix}`, 'warn');
         break;
       case 'start':
         this._log(`发词完成:${ev.seats} 人。没有人知道自己是不是卧底。`);
@@ -769,8 +856,13 @@ export class UndercoverScreen {
     this._lastView = view;
 
     this.dom.roundTag.textContent = st.phase === 'idle' ? '未开局' : `第 ${st.round} / ${st.config.rounds} 轮`;
-    this.dom.phaseTag.textContent = PHASE_LABEL[st.phase] || '';
-    this.dom.phaseTag.classList.toggle('is-vote', st.phase === 'vote');
+    // 回合边界上:阶段标签改成「第 N 轮结束 →」,让「刚才那一轮结束了」这件事
+    // 在画面上**停留**一会儿(自动推进时约 1.4s;暂停时一直停着,直到按「下一回合」)
+    this.dom.phaseTag.textContent = this._roundEnd
+      ? `第 ${this._roundEnd.round} 轮结束 →`
+      : (PHASE_LABEL[st.phase] || '');
+    this.dom.phaseTag.classList.toggle('is-vote', st.phase === 'vote' && !this._roundEnd);
+    this.dom.phaseTag.classList.toggle('is-boundary', !!this._roundEnd);
 
     // 上帝面板:只有观看模式才画(玩家模式连 DOM 都不填)
     if (this.mode === 'watch') this._renderGod(view);
@@ -787,7 +879,8 @@ export class UndercoverScreen {
     this.table.update(buildTableViewModel(st, { actor }), {
       labels,
       roundText: st.phase === 'end' ? (st.winner === 'undercover' ? '卧底胜' : '平民胜')
-        : `第 ${st.round} 轮 · ${PHASE_LABEL[st.phase] || ''}`,
+        : this._roundEnd ? `第 ${this._roundEnd.round} 轮结束 → 第 ${this._roundEnd.next} 轮`
+          : `第 ${st.round} 轮 · ${PHASE_LABEL[st.phase] || ''}`,
       roundHint: st.phase === 'end' ? '点「设置」可以再来一局' : `还剩 ${st.alive.filter(Boolean).length} 人`,
       thinkingSeat: this._thinkingSeat,
     });
@@ -965,6 +1058,8 @@ export class UndercoverScreen {
     clearTimeout(this._guessArmTimer);
     this.dom.action.hidden = true;
     this.dom.action.innerHTML = '';
+    // 手机上操作区会占掉底部一整条:撤掉标记,矩阵/现场记录才能回到原位
+    this.root.querySelector('.uc')?.classList.remove('is-acting');
     if (r) r(result);
   }
 
@@ -973,8 +1068,28 @@ export class UndercoverScreen {
       this._humanResolve = resolve;
       this.dom.action.innerHTML = '';
       this.dom.action.hidden = false;
+      // ★ 手机上「描述矩阵」和「操作区」都在底部,不加这个标记就会叠在一起。
+      //   标记在根节点上,让 CSS 决定谁往上让(见 styles3d.css 的手机横屏块)。
+      const shell = this.root.querySelector('.uc');
+      shell?.classList.add('is-acting');
       build(this.dom.action, (result) => this._resolveHuman(result));
+      // 操作区有两行(描述 + 猜词),高度写死必然被改结构的人改坏 ——
+      // 所以量一次写进 CSS 变量(与扑克的 --actionbar-h 同一个做法),
+      // 矩阵/现场记录用 calc() 让开它。
+      // ⚠️ 先用**同步** offsetHeight(强制一次布局,拿到的是真实高度),
+      //    再在下一帧补量一次(字体/表情符号落位后可能高 1~2px)。
+      //    只靠 requestAnimationFrame 会漏:实测有的回合 rAF 里 offsetHeight 还是旧值,
+      //    矩阵就仍按兜底的 74px 让位,底部被操作区压掉 53px。
+      this._measureAction();
+      requestAnimationFrame(() => this._measureAction());
     });
+  }
+
+  /** 把操作区的实测高度写进 --uc-act-h(手机横屏的面板让位靠它) */
+  _measureAction() {
+    const shell = this.root.querySelector('.uc');
+    if (!shell || !this.dom.action || this.dom.action.hidden) return;
+    shell.style.setProperty('--uc-act-h', `${Math.ceil(this.dom.action.offsetHeight)}px`);
   }
 
   _showActionHint(text) { this.toast(text, 'info', 1800); }

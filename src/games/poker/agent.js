@@ -18,6 +18,10 @@
 
 import { cardText, rankOf, suitOf, RANK_LABEL } from './engine/cards.js';
 import { evaluate, describe, categoryKey } from './engine/handEval.js';
+// 「每条街的成牌」由**引擎**算好(与摊牌判定同一套 evaluate/describe,含短牌重排),
+// 这里只负责把它写成牌桌上的中文。绝不在 agent 里再写一份牌型判定 ——
+// 两份实现早晚会漂,而「提示词里的牌型名 ≠ 摊牌时的牌型名」是最难查的一类 bug。
+import { handByStreet } from './engine/engine.js';
 import { riskLabel } from './personas.js';
 // 通用调用基座:重试 / 降级 / 超时 / 截断 / 失败分类都在这里(与扑克无关)。
 // ⚠️ 下面这几个纯函数在本文件末尾**原样转发**出去 —— 仓库里已有测试与调试脚本
@@ -130,6 +134,66 @@ function madeHandText(view) {
   }
   // 公共牌不足 3 张(正常只可能是翻前):用起手牌的说法。
   return preflopHandText(hole);
+}
+
+/**
+ * 三条街在牌桌上的叫法。
+ *
+ * 引擎的 STREET_LABEL 写的是「翻牌 / 转牌 / 河牌」(界面顶栏要短),
+ * 而这里说的是「**成牌是在翻牌圈成立的**」这种句子 —— 用户原话就是「翻牌圈」,
+ * 所以这一段用带「圈」的说法,读起来更像牌桌上说的话。
+ */
+const STREET_CN = { flop: '翻牌圈', turn: '转牌圈', river: '河牌圈' };
+const STREET_SEQ = ['flop', 'turn', 'river'];
+
+/**
+ * 「这个成牌是哪一街成的」+「每条街分别是什么」。
+ *
+ * 为什么非要有这一段(用户实测的第二个问题):
+ *   原话是「AI 分不清 …是什么时候成的牌(比如翻牌圈就成的牌,牌圈也以为是刚成的牌)」。
+ *   提示词里原本只有「你现在的成牌:两对 Q 与 10」,模型不知道它是**哪一街**拿到的,
+ *   于是在转牌/河牌把一手早就在的牌说成「刚中」,跟着就把下注理由也编错了。
+ *   现在明确写出「翻牌圈就成立了,转牌圈、河牌圈都没有改变它」;
+ *   如果某一街真的改变了成牌,就写「转牌圈改变了你的成牌:从 X 变成 Y」。
+ *
+ * ⚠️ 只用**已经发出**的公共牌(逐街截断,见引擎的 handByStreet):
+ *    不能用未来信息,否则 AI 就作弊了。
+ * ⚠️ 底牌不全时返回 null:宁可不写,也不编(与 madeHandText 同一条规矩)。
+ *
+ * @param {object} view viewForSeat 的座位视角
+ * @returns {{timing:string, streets:string}|null}
+ */
+function handTimingInfo(view) {
+  const info = handByStreet(view?.me?.hole, view?.board, { shortDeck: !!view?.shortDeck });
+  if (!info) return null;
+  // 翻前:还没有公共牌,谈不上「哪一街成的」。但这句话也要给 ——
+  // 否则模型会自己脑补一个「成牌时机」出来。
+  if (!info.streets.length) {
+    return {
+      timing: '现在还是**翻牌前**,一张公共牌都没发,所以还谈不上「哪一街成的」;'
+        + '等翻牌圈发出 3 张公共牌,才有成牌这一说',
+      streets: '',
+    };
+  }
+  const { formed, current, streets } = info;
+  const later = streets
+    .filter((s) => STREET_SEQ.indexOf(s.street) > STREET_SEQ.indexOf(formed.street))
+    .map((s) => STREET_CN[s.street]);
+  let timing;
+  if (info.changedNow) {
+    // 就是当前这一街(转牌/河牌)变的 —— 用户点名要的说法:「从 X 变成 Y」
+    const from = info.prev ? `从「${info.prev.name}」(${STREET_CN[info.prev.street]})` : '从「还没成牌」';
+    timing = `**${STREET_CN[current.street]}改变了你的成牌**:${from}变成「${current.name}」`;
+  } else if (later.length) {
+    // 早就在了,后面几街没有改变它 —— 这是最容易被模型说成「刚中」的情况
+    timing = `这个成牌在**${STREET_CN[formed.street]}**就成立了,${later.join('、')}都没有改变它`
+      + `(不是刚成的,别再当成新牌型)`;
+  } else {
+    // 翻牌圈一出来就成了(公共牌只有 3 张)
+    timing = '这个成牌是**翻牌圈**成的(翻前还没有公共牌,翻牌一出来它就在了)';
+  }
+  const perStreet = streets.map((s) => `${STREET_CN[s.street]}「${s.name}」`).join(' → ');
+  return { timing, streets: perStreet };
 }
 
 /** 本地兜底决策:牌力 + 底池赔率 + 性格权重 */
@@ -682,6 +746,187 @@ function normalizeActionWord(raw) {
 }
 
 /* ==================================================================== *
+ * 动作捞取 —— 「动作优先」契约的解析半边
+ * ==================================================================== *
+ *
+ * 用户原话:「为什么需要返回思维链?有时阶段时提示仅返回思维链,但是思维链不是
+ * 必须的,优先保证操作和简短的思路文本」。
+ *
+ * 也就是说:**动作是唯一必须的东西**。所以解析这边的目标变了 ——
+ * 不再是「JSON 里没有 action 就判这一手失败」,而是「从任何位置把动作捞出来」:
+ *   · JSON 里有 action → 直接用(老路径,最可靠);
+ *   · JSON 里有 thinking/say 但没有 action → 从这些文字里捞
+ *     (实测最常见:模型把「跟注」写进了思路,却忘了给 action 字段);
+ *   · 干脆没有 JSON、只有一段话 → 也从那段话里捞。
+ * 只有**真的捞不到**时才回落本地策略(那时才该报「没有给出可识别的动作」)。
+ *
+ * ★ 三条设计红线(每一条都是踩过的坑):
+ *   ① **不能只扫关键词**。以前是拿整段文字跑 normalizeActionWord,谁先被正则
+ *      撞上就算谁 —— 「他加注到 200,我弃牌」会被读成 raise(命中的是**对手**的动作)。
+ *      所以这里看**动作词前面的几个字**:出现「对手/他/她」就当不是我的动作,
+ *      出现「我/决定/还是/最后」才当成我的决定。
+ *   ② **英文散文不算决定**。`tools/truncfallback.mjs` 钉着一条:连续截断时
+ *      「The opponent bet 180 into a 60 pot.」这种推理原文**不许被猜成动作**
+ *      (以前从散文里猜出过 allin,玩家看到的是一手莫名其妙的牌)。
+ *      所以英文动词只有在「像我的决定」时才算:句首、或前面有 I/we/should/action 这类词;
+ *      而 "the opponent bet" 会被第 ① 条直接排除。
+ *   ③ **不依赖 reasoning 通道**。`reasoning_content` 是模型的草稿,可选项 ——
+ *      这里没有任何一处读它(它要真被当成答案交上来,也只是「一段文本」,
+ *      照样按上面的规则判,捞不到就兜底)。
+ */
+
+/** 中文动作词 → 内部动作名。长词排前面(「加注到」必须先于「加注」被匹配) */
+const CN_ACTION_WORDS = [
+  ['全下', 'allin'], ['全压', 'allin'], ['梭哈', 'allin'],
+  ['弃牌', 'fold'], ['盖牌', 'fold'], ['放弃这手', 'fold'],
+  ['看牌', 'check'], ['过牌', 'check'], ['不加注', 'check'],
+  ['跟注', 'call'], ['平跟', 'call'], ['跟一注', 'call'],
+  ['加注到', 'raise'], ['加注至', 'raise'], ['加注', 'raise'], ['下注', 'raise'], ['加到', 'raise'],
+];
+const CN_ACTION_MAP = new Map(CN_ACTION_WORDS);
+/** 长的在前:同一个起点上,正则的备选顺序决定谁先命中 */
+const CN_ACTION_RE = new RegExp(
+  CN_ACTION_WORDS.map(([w]) => w).sort((a, b) => b.length - a.length).join('|'), 'g');
+
+/** 英文动作词(带词边界,免得 'called' 里的 call、'folded' 里的 fold 之类乱入) */
+const EN_ACTION_RE = /\b(all[\s-]?in|shove|fold|check|call|raise|bet)\b/gi;
+const EN_ACTION_MAP = new Map([
+  ['allin', 'allin'], ['all in', 'allin'], ['shove', 'allin'],
+  ['fold', 'fold'], ['check', 'check'], ['call', 'call'], ['raise', 'raise'], ['bet', 'raise'],
+]);
+
+/** 「这是我的决定」的语境词(中英各一套) */
+const SELF_CUE_CN = /(我|我们|咱|决定|选择|打算|准备|计划|就|先|还是|最后|最终|结论|动作|应该|所以|要)/;
+const SELF_CUE_EN = /\b(i|i'm|i'll|i'd|we|we'll|let's|my|me|should|will|would|gonna|decide|decision|action|final)\b/i;
+/**
+ * 「这是对手的动作」的判断 —— **只看紧挨着动作词的那几个字**。
+ *
+ * 为什么不能看整句:实测的错例是「他加注到 200,我弃牌」——
+ * 按整句找「他」的话,连「我弃牌」都会被判成对手的动作,于是整条被丢掉;
+ * 而按前面 5 个字找,「他加注」被排除、「我弃牌」正常命中。
+ * 反过来,「对手很强,我跟注」这种句子也不该因为前半句提到对手就把跟注丢掉。
+ */
+const OTHER_CUE_NEAR = /(对手|对方|别人|有人|他们|她们|他|她|opponent|villain|\bhe\b|\bshe\b|\bthey\b|\bhis\b|\bher\b)/i;
+function isOtherAction(pre) { return OTHER_CUE_NEAR.test(String(pre).slice(-5)); }
+
+/** 整段就是一个动作词(可带金额)。**锚定**整串,不做子串猜测 */
+const BARE_ACTION_RE = /^(?:all[\s-]?in|shove|fold|check|call|raise|bet|全下|全压|梭哈|弃牌|盖牌|看牌|过牌|跟注|平跟|加注|下注)(?:\s*(?:到|至)?\s*\d+)?$/i;
+
+/** 取 idx 之前的那一小段(截到上一个句读为止),用来判断语境 */
+function cueBefore(text, idx, n = 12) {
+  const from = Math.max(0, idx - n);
+  const p = text.slice(from, idx);
+  const cut = Math.max(...['。', '！', '？', '!', '?', '\n', ';', '；', '：', ':'].map((ch) => p.lastIndexOf(ch)));
+  return cut >= 0 ? p.slice(cut + 1) : p;
+}
+
+/** 动作词后面紧跟的金额(「加注到 200」「raise 200」) */
+function amountAfter(text, idx, n = 14) {
+  const tail = String(text).slice(idx, idx + n);
+  const m = /(\d+(?:\.\d+)?)/.exec(tail);
+  if (!m) return undefined;
+  const v = Number(m[1]);
+  return Number.isFinite(v) && v > 0 ? v : undefined;
+}
+
+/**
+ * 从一段自然语言里捞动作。
+ *
+ * 五层,优先级从高到低:
+ *   ① 显式标注(action: call / 动作:跟注 / 决定:弃牌)—— 模型自己标出来的,最可信;
+ *   ② 中文动作词 + 「我的决定」语境 —— 取**最后**一个(模型的结论一般写在最后);
+ *   ③ 中文动作词(没有语境词也认)—— 取**第一个**,只用于「整段话都很短、
+ *      就是在说要怎么打」的情况,例如思路里只写「这价格便宜,跟注看一张」;
+ *   ④ 英文动作词 + 语境(句首 / I should / let's)—— 兜底,散文里描述对手的不算;
+ *   ⑤ 整段就是一个动作词(「call」「跟注」)。
+ */
+function mineActionText(rawText) {
+  const text = String(rawText || '');
+  if (!text.trim()) return null;
+
+  // ① 显式标注
+  const labeled = /["']?(?:action|move|decision|choice|玩法|动作|决定|结论)["']?\s*[:=]\s*["']?\s*([a-z][a-z-]*|全下|弃牌|盖牌|看牌|过牌|跟注|平跟|加注到|加注|下注)/i.exec(text);
+  if (labeled) {
+    const action = normalizeActionWord(labeled[1]);
+    if (action) return { action, amount: amountAfter(text, labeled.index + labeled[0].length), why: 'labeled' };
+  }
+
+  // ② 中文动作词 + 我的决定语境(取最后一个)
+  let bestCue = null;
+  let firstPlain = null;
+  CN_ACTION_RE.lastIndex = 0;
+  for (let m = CN_ACTION_RE.exec(text); m; m = CN_ACTION_RE.exec(text)) {
+    const pre = cueBefore(text, m.index);
+    if (isOtherAction(pre)) continue;                  // 「他加注」「对手全下」不是我的动作
+    const hit = { action: CN_ACTION_MAP.get(m[0]), amount: amountAfter(text, m.index + m[0].length), why: 'cn' };
+    if (!hit.action) continue;
+    if (SELF_CUE_CN.test(pre) || !pre.trim()) bestCue = hit;   // 句首也算「我的决定」
+    if (!firstPlain) firstPlain = hit;
+  }
+  if (bestCue) return bestCue;
+  if (firstPlain) return firstPlain;
+
+  // ③ 英文动作词(只在「像我的决定」时算;见文件顶上红线 ②)
+  let bestEn = null;
+  EN_ACTION_RE.lastIndex = 0;
+  for (let m = EN_ACTION_RE.exec(text); m; m = EN_ACTION_RE.exec(text)) {
+    const pre = cueBefore(text, m.index);
+    if (isOtherAction(pre)) continue;
+    const action = EN_ACTION_MAP.get(m[0].toLowerCase().replace(/\s+/g, ' '));
+    if (!action) continue;
+    if (SELF_CUE_EN.test(pre) || !pre.trim()) {
+      bestEn = { action, amount: amountAfter(text, m.index + m[0].length), why: 'en' };
+    }
+  }
+  if (bestEn) return bestEn;
+
+  /**
+   * ④ 整段**就是**一个动作词(「call」「跟注」「加注到 200」)。
+   *
+   * ⚠️ 这里必须用**锚定**的整串匹配,不能拿 normalizeActionWord 去猜「短句」:
+   *    normalizeActionWord 认单字「跟」「加」,于是「我劝你别跟。」「他可能会加注」
+   *    都会被猜成动作 —— 实测这就是把「对手要加注」读成「我要加注」的来源。
+   *    只有整段干干净净就是一个动作词(+ 可选金额)时才认。
+   */
+  const bare = text.trim().replace(/^["'「『(\s]+|["'」』).,。;；\s]+$/g, '').trim();
+  if (BARE_ACTION_RE.test(bare)) {
+    const action = normalizeActionWord(bare);
+    if (action) return { action, amount: amountAfter(bare, 0, bare.length), why: 'bare' };
+  }
+  return null;
+}
+
+/**
+ * 一次回答 → 动作(**唯一入口**):重试外壳的 validator 与 _parseDecision 都走它,
+ * 所以「算不算能用」和「最后解析出什么」永远是同一份判断(不会漂)。
+ *
+ * @param {object|null} parsed 已经 extractJson 出来的对象(没有就传 null)
+ * @param {*} rawText 原始文本(截断/纯文本时靠它)
+ * @returns {{action:string, amount?:number, why:string}|null}
+ */
+function extractAction(parsed, rawText) {
+  if (parsed && typeof parsed === 'object') {
+    // ① JSON 的动作字段 —— 最可靠,而且字段名各家写法不一,都认
+    const word = normalizeActionWord(parsed.action ?? parsed.move ?? parsed.decision ?? parsed.choice ?? parsed.do ?? parsed.play);
+    if (word) {
+      const n = Number(parsed.amount ?? parsed.raiseTo ?? parsed.to ?? parsed.bet ?? parsed.size ?? 0);
+      return { action: word, amount: Number.isFinite(n) && n > 0 ? n : undefined, why: 'field' };
+    }
+    // ② 有 JSON 但没有动作字段(实测最常见:动作只写在了思路里)
+    const fields = [parsed.thinking, parsed.reasoning, parsed.reason, parsed.say, parsed.speech, parsed.talk, parsed.line, parsed.text, parsed.note];
+    for (const f of fields) {
+      if (typeof f !== 'string') continue;
+      const hit = mineActionText(f);
+      if (hit) return { ...hit, why: `${hit.why}:json-field` };
+    }
+  }
+  // ③ 没有 JSON(或 JSON 里什么都捞不到)→ 从整段原文捞
+  const hit = mineActionText(rawText);
+  return hit ? { ...hit, why: `${hit.why}:text` } : null;
+}
+
+
+/* ==================================================================== *
  * 模型调用的重试:临时性失败再试几次,实在不行才回落本地策略
  * ==================================================================== */
 
@@ -813,21 +1058,46 @@ class PokerAgent extends LlmCaller {
       '2. 只能做系统给出的合法动作,加注金额不能超过你的最大可用额。',
       '3. 只输出一个 JSON 对象,不要输出任何别的内容(不要 markdown、不要解释)。',
       '',
-      '【不许搞错的三件事 —— 出错了会显得很蠢】',
+      '【不许搞错的五件事 —— 出错了会显得很蠢】',
       '① **别认错自己的位置**。你是什么位置上面写着(UTG / CO / BTN / SB / BB 等),',
       '   照抄那个词就行,不要自己推。也别把「第几个行动」和「位置好坏」搞反:',
       '   BTN 是最后行动、位置最好;SB/BB 是先行动、位置最差。',
       '② **别搞错自己的底牌**。下面会明确给你两张牌,就按那两张说,不要记成别的牌。',
       '   也不要说别人的底牌 —— 你看不到。想提别人只能猜范围,例如「他那个加注像是有一对」。',
       '③ **别把自己刚才做过的事记错**。本手的过程会按顺序列出来,不确定就回去看。',
+      // ④⑤ 是用户实测的第二类混乱:「分不清手牌和公共牌」「分不清成牌是哪一街成的」。
+      // 只加约束、不动上面三条 —— 这份提示词被多轮调过,删改的代价很高。
+      '④ **底牌和公共牌是两类完全不同的牌,别混**。',
+      '   · 「你的底牌」只有**两张**,而且**只有你有** —— 对手看不到,公共牌里也不会出现它们;',
+      '   · 「公共牌」是桌上所有人**共用**的 3~5 张 —— 你能用,对手也能用,它们不属于任何人;',
+      '   · 你的一手牌 = **你的两张底牌 + 公共牌里挑出来的**最好的 5 张。',
+      '     所以「公共牌上有一对 Q」不等于「你有一对 Q」,更不等于「对手没有」;',
+      '   · 说「我中了」的时候,先想清楚那张牌到底是**你的底牌**还是**大家共用的公共牌**。',
+      '⑤ **成牌是哪一街成的,提示词里写着,照它说,不要自己猜**。',
+      '   · 提示词里有一行「成牌是哪一街成的」——翻牌圈就成立、后面转牌/河牌没变的牌,',
+      '     **不是刚成的**。别在转牌/河牌把它说成「我刚中」;',
+      '   · 如果那一行写着「转牌圈改变了你的成牌:从 X 变成 Y」,那才是这一街真的变了;',
+      '   · 这一行只按**已经发出**的公共牌算,不会包含还没发的牌。',
       '',
-      '【关于 thinking 字段 —— 最重要,请认真遵守】',
+      '【输出契约 —— 动作第一,思路第二】',
+      '★ 每次回答**只有动作是必须的**:`action`(fold / check / call / raise / allin);',
+      '  要加注/全下再给 `amount`。除此之外的字段都是可选的。',
+      '· `say`(牌桌上说的一句话)—— 可选,可以留空;',
+      '· `thinking`(私密思路)—— **可选,可以不写**。要写就一句话(20 字以内),',
+      '  能省则省:**别为了写思路把动作挤掉**。',
+      '',
+      '⚠️ **只写思路、没有动作 = 这次回答作废**。系统拿不到动作只能改用本地策略替你打,',
+      '   等于你白白让掉一手牌。所以先把动作定下来,再补一句想法 ——',
+      '   哪怕只剩一点额度,也要保证把 `action` 写出来。',
+      '',
+      '【关于 thinking 字段 —— 它是可选的,不是作业】',
       '`thinking` 会**原样显示在牌桌上给玩家看**,所以它必须是给人读的中文。',
+      '**不写它完全可以**(字段省略、或者给空字符串都行)。写的话请守下面的规矩:',
       '',
       '硬性要求:',
       '· **只能写中文**。一个英文字母都不要出现(牌型可以写「Q6同花」「A高」这种中文写法)。',
-      '· **不超过 40 个字**,一到两句,像牌桌上顺口说的一句话。',
-      '· 内容说清:你的牌力怎么样 / 你猜对手在想什么 / 为什么这么打。',
+      '· **不超过 20 个字**,一句话,像牌桌上顺口说的一句话。',
+      '· 内容说清:你的牌力怎么样 / 你猜对手在想什么 / 为什么这么打 —— 挑一句说就行。',
       '',
       '绝对不要出现这些(它们不是给人看的):',
       '· "We need…" / "Need analyze…" / "JSON" / "output format" 这类英文说明;',
@@ -866,8 +1136,11 @@ class PokerAgent extends LlmCaller {
       '**不想说话就留空字符串 ""** —— 连话都不说也是一种风格,不用每手都开口。',
       '',
       '【输出格式】(严格 JSON,不要 markdown 代码块)',
-      '{"thinking":"一到两句中文,40 字以内","say":"牌桌上说的一句话,20 字以内,可留空,但绝不能报自己的底牌或牌型","action":"fold|check|call|raise","amount":数字}',
-      '说明:check / call / fold 时 amount 可省略;raise 时 amount 是「加注到」的目标总额(不是增量)。想全下就把 amount 写成你的最大可用额。',
+      // ⚠️ 字段顺序**故意**是 action 在前:模型是自回归的,先写出来的字段更容易被写出来。
+      //    以前 thinking 排第一位,于是「思考写得很长、动作忘了写」成了实测里最常见的一种失败。
+      '{"action":"fold|check|call|raise|allin","amount":数字,"say":"牌桌上说的一句话,20 字以内,可留空,但绝不能报自己的底牌或牌型","thinking":"可选,一句话,20 字以内,不写也行"}',
+      '说明:`action` 是**唯一必须**的字段;check / call / fold 时 amount 可省略;raise 时 amount 是「加注到」的目标总额(不是增量)。想全下就把 amount 写成你的最大可用额。',
+      '⚠️ 只有 `thinking` 没有 `action` 的回答会被判为无效(见上面那段输出契约)。',
     ].filter(Boolean).join('\n');
   }
 
@@ -881,7 +1154,18 @@ class PokerAgent extends LlmCaller {
     // 和把盲注位当好位置这类混乱。
     lines.push(`第 ${view.handNo} 手牌,现在是【${view.streetLabel}】。`);
     lines.push('');
-    lines.push('════ 以下是关于你自己的事实,照它说,不要自己推 ════');
+    /**
+     * ★ 底牌区与公共牌区**必须一眼能分开**(用户实测的第二个问题:
+     *   「AI 分不清手牌和公共牌」)。
+     *
+     * 光写成两行普通文字是不够的 —— 模型会把两行当成同一类事实混着用
+     * (实测它把公共牌上的 10 说成「我的 10」,或者把自己的底牌当成「大家都有」)。
+     * 所以这里做三件事:
+     *   ① 底牌区有**只属于你**的抬头,公共牌区有**所有人共用**的抬头;
+     *   ② 底牌那行末尾直接标「这两张只有你有」,公共牌那行末尾标「这几张所有人共用」;
+     *   ③ 成牌单独成行,并额外给「是哪一街成的」(见 handTimingInfo)。
+     */
+    lines.push('════ 下面这几行是**只属于你**的信息(别人看不到,里面没有对手的牌)════');
     lines.push(`· 你的位置:**${view.position || '未标注'}**`);
     // 底牌与**成牌名**分开写,而且成牌名单独占一行。
     // 以前成牌名是塞在底牌那行末尾的括号里的(「(当前成牌:…)」)—— 位置靠前、
@@ -890,10 +1174,18 @@ class PokerAgent extends LlmCaller {
     // 翻前没有公共牌,describe 至少要 5 张牌套不上,所以走 preflopHandText 那条路
     // (详见 madeHandText 的注释);绝不能在翻前硬调 describe。
     const myHand = madeHandText(view);
-    lines.push(`· 你的底牌:**${view.me.hole.filter((c) => c !== null && c !== undefined).map(cardText).join(' ')}**`);
+    const timing = handTimingInfo(view);
+    lines.push(`· 你的底牌:**${view.me.hole.filter((c) => c !== null && c !== undefined).map(cardText).join(' ')}**`
+      + '  ← 这两张**只有你有**:别人手里没有它们,公共牌里也不会出现它们');
     if (myHand) {
       lines.push(`· 你现在的成牌:**${myHand}**`
-        + '(这是引擎按**当前已经发出**的公共牌算好的,直接采信 —— 不要自己再数一遍)');
+        + '(这是引擎按「你的两张底牌 + **当前已经发出**的公共牌」算好的,直接采信 —— 不要自己再数一遍)');
+    }
+    // 「是哪一街成的」单独占一行,而且放在成牌名**紧后面** ——
+    // 模型读成牌名时顺手就看到时机,不会等到转牌/河牌才去猜「这是刚中的吗」。
+    if (timing) {
+      lines.push(`· 成牌是哪一街成的:${timing.timing}`);
+      if (timing.streets) lines.push(`· 每条街的成牌(只列**已经发出**的公共牌):${timing.streets}`);
     }
     // 筹码不能只给原始数字 —— 实测只写「你的筹码:60」时模型不会自己换算成
     // 「3 个大盲,快出局了」,它就把 60 当一个数字看。这里直接给结论。
@@ -911,7 +1203,13 @@ class PokerAgent extends LlmCaller {
     //    纠结这件事**,整段思考全是「我的位置是 CO 但按钮位是 1 号位…看描述
     //    有点混乱…」这种废话(实测踩过,用户直接反馈「思考过程完全错乱」)。
     //    所以座位号一律不给 —— 牌桌上本来也不靠座位号认人,靠位置和名字。
-    lines.push(`公共牌:${view.board.length ? view.board.map(cardText).join(' ') : '(还没有公共牌)'}`);
+    //
+    // ★ 公共牌单独成区,并明说「这几张所有人共用」——
+    //   与上面那个「只属于你」的底牌区在视觉上彻底分开(用户实测:模型会混)。
+    //   注意 `公共牌:` 这个前缀**必须保留**(测试与其它工具按它替换/定位这一行)。
+    lines.push('──── 公共牌(这几张**所有人共用**:你能用、对手也能用,它们**不是**你的底牌)────');
+    lines.push(`公共牌:${view.board.length ? view.board.map(cardText).join(' ') : '(还没有公共牌)'}`
+      + (view.board.length ? '  ← 这几张是**所有人共用**的,不是只有你有' : ''));
     lines.push(`底池:${view.pot}。当前需要跟注:${view.toCall}${view.toCall > 0 ? `(底池赔率约 ${((view.toCall / (view.pot + view.toCall)) * 100).toFixed(0)}%)` : ''}。`);
     lines.push(`盲注:${view.smallBlind}/${view.blindUnit || view.bigBlind}。`);
     if (view.orderText) lines.push(`本手行动顺序:${view.orderText}(越靠后位置越好)`);
@@ -1060,10 +1358,18 @@ class PokerAgent extends LlmCaller {
     }));
 
     lines.push('');
-    lines.push('【决策前再确认一次 —— 下面四行就是事实,照抄,不要自己推】');
-    lines.push(`· 你的底牌:${view.me.hole.filter((c) => c !== null && c !== undefined).map(cardText).join(' ')}`);
-    lines.push(`· 公共牌:${view.board.length ? view.board.map(cardText).join(' ') : '还没有(这是翻前)'}`);
+    lines.push('【决策前再确认一次 —— 下面几行就是事实,照抄,不要自己推】');
+    // 每条都带上「这属于谁」:底牌只有你有 / 公共牌所有人共用。
+    // 用户实测的「分不清手牌和公共牌」就发生在这一块 —— 复述是模型最后读到的东西,
+    // 在这里把归属写死,比在前面那一大段里写十遍都管用。
+    lines.push(`· 你的底牌:${view.me.hole.filter((c) => c !== null && c !== undefined).map(cardText).join(' ')}`
+      + '(**只有你有**,对手看不到)');
+    lines.push(`· 公共牌:${view.board.length ? view.board.map(cardText).join(' ') : '还没有(这是翻前)'}`
+      + (view.board.length ? '(**所有人共用**,不是你的底牌)' : ''));
     lines.push(`· 你现在的成牌:${myHand || '还不知道(牌不全)'}`);
+    // 「哪一街成的」也要进复述块:模型是在**读完这一块之后**才下决定的,
+    // 只在开头写一次的话,它到决策时已经把「翻牌圈就成立了」丢掉了(治 lost in the middle)。
+    if (timing) lines.push(`· 成牌是哪一街成的:${timing.timing}`);
     lines.push(`· 需要跟注:${view.toCall}${view.toCall === 0 ? '(不用花钱,可以看牌)' : ''};底池:${view.pot}`);
     return lines.join('\n');
   }
@@ -1481,9 +1787,9 @@ class PokerAgent extends LlmCaller {
    * 返回 `{ verdict:'truncated'|'empty'|'action' }` 表示不能用(外壳据此重试),
    * 返回 null 表示能用。
    *
-   * 为什么不让它顺手把动作也解析出来:外壳只该管「值不值得再发一次」,
-   * 真正的解析必须**只此一处**(_parseDecision)—— 同一份 JSON 在两个地方
-   * 各解析一次,迟早会漂成两种行为(这个仓库已经栽过两次这种坑)。
+   * ⚠️ 它也会顺手判一次动作(extractAction),但**不是**第二个解析入口:
+   *    `_parseDecision` 之后再走**同一个函数**,所以两处不可能得出两种结论。
+   *    真正的「解析成决策」仍然只在 _parseDecision 一处。
    *
    * 三种不能用的回答对应**不同**的重试发法(见 _callWithRetry 里的判定):
    *   · truncated —— 截断(只有推理、没有正式回答):额度翻倍 + 关掉推理通道,
@@ -1494,14 +1800,22 @@ class PokerAgent extends LlmCaller {
    */
   _validateDecision(truncated) {
     const text = this._lastRaw;
-    if (truncated) return { verdict: 'truncated' };
     if (!String(text || '').trim()) return { verdict: 'empty' };
-    const parsed = extractJson(text);
-    const action = parsed
-      ? normalizeActionWord(parsed.action ?? parsed.move ?? parsed.decision)
-      : normalizeActionWord(text);
-    if (!action) return { verdict: 'action' };
-    return null;
+    /**
+     * ★ 先看**能不能捞到动作**,再看是不是截断 —— 顺序不能反。
+     *
+     * 用户的要求是「动作优先」:推理把额度吃光、正式回答没来,但只要那段残缺输出里
+     * 已经写明了要跟注/加注,就没必要再拿「截断」把这一手判死 —— 直接把动作捞出来用,
+     * 比退回去让本地策略替它打更接近模型的真实意图。
+     * 捞不到才按截断走「额度翻倍 + 关掉推理通道」那条重试。
+     *
+     * 注意这里和 _parseDecision 用的是**同一个** extractAction:
+     * 两处各写一份判断的话,迟早会出现「validator 说能用、解析说没有」的漂移。
+     */
+    const hit = extractAction(extractJson(text), text);
+    if (hit && hit.action) return null;
+    if (truncated) return { verdict: 'truncated' };
+    return { verdict: 'action' };
   }
 
   /**
@@ -1555,14 +1869,30 @@ class PokerAgent extends LlmCaller {
       // ⚠️ say 比 thinking 多一层**漏牌检测**(清洗之后跑,见 _cleanSayForView):
       //    thinking 是私密的,说真牌力没问题;say 是要给玩家看的,报牌就是白送信息。
       say = this._cleanSayForView(parsed.say ?? parsed.speech ?? parsed.talk ?? parsed.line, view);
-      action = normalizeActionWord(parsed.action ?? parsed.move ?? parsed.decision);
-      amount = Number(parsed.amount ?? parsed.raiseTo ?? parsed.to ?? parsed.bet ?? 0) || undefined;
     } else {
       // 没有 JSON:退一步,从纯文本里找动作词。
       // 这段是「推理原文当答案」的下场(见 callLLMDirect 里 `full || reasoning` 的说明),
       // 同样过一遍清洗(上限沿用旧的 120 字,不改这条兜底路径的既有行为)。
-      action = normalizeActionWord(raw);
       thinking = cleanThinking(raw, 120);
+    }
+
+    /**
+     * ★ 动作解析:**不区分有没有 JSON**,统一走 extractAction(动作优先)。
+     *
+     * 以前是两个分支:有 JSON 就只看 `action` 字段,没有 JSON 就 `normalizeActionWord(整段)`。
+     * 两者的毛病正好相反 —— 前者只要模型忘了写 action 就整手作废(用户实测),
+     * 后者会让「他加注到 200」里的动词被当成自己的动作。
+     * 现在交给同一个函数:先看字段,再从思路/原文里捞,捞不到才算没有。
+     *
+     * ⚠️ 截断的回答里 `raw` 其实是模型的**推理草稿**(见 callLLMDirect 的 `full || reasoning`),
+     *    能捞到动作就照用(动作优先),但那段草稿**不能**当 thinking 显示给玩家 ——
+     *    用户截图里的英文占位气泡就是这么来的。所以截断时清掉英文草稿。
+     */
+    const hit = extractAction(parsed, raw);
+    if (hit && hit.action) {
+      action = hit.action;
+      amount = hit.amount;
+      if (this.lastTruncated && !/[\u4e00-\u9fa5]/.test(thinking)) thinking = '';
     }
 
     if (!action) {
@@ -1600,5 +1930,8 @@ class PokerAgent extends LlmCaller {
 export {
   PokerAgent, fallbackDecide, preflopStrength, normalizeActionWord, ACTION_LABEL, LOCAL_SAY,
   evaluate, describe, categoryKey, cleanThinking, cleanSay, detectSayLeak,
+  // 动作捞取(「动作优先」契约的解析半边)与「成牌是哪一街成的」:
+  // 都导出给测试直接钉行为(tools/actioncontracttest.mjs),不必绕过 decide() 去构造模型输出。
+  mineActionText, extractAction, handTimingInfo,
   extractJson, classifyLlmFailure, resolveRetryPolicy, LLM_RETRY,
 };

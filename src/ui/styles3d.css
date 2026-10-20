@@ -1495,7 +1495,16 @@ body.is-player-mode .actionbar__hint { display: none; }
   font-variant-numeric: tabular-nums;
 }
 .uc__tag--phase.is-vote { color: #7a4b9a; border-color: rgba(122, 75, 154, .4); }
+/* 回合边界:「第 N 轮结束 →」要**比平时更显眼**,否则观众一眼扫不到就以为没变化。
+   只改颜色不动位置 —— 标签一挪,顶栏在手机上就要重排(那里每 1px 都是挤出来的)。 */
+.uc__tag--phase.is-boundary {
+  color: var(--gold); border-color: rgba(196, 162, 88, .55);
+  background: rgba(196, 162, 88, .12);
+}
 .uc__topBtns { display: flex; gap: 8px; }
+/* 节奏按钮:「⏸ 暂停 / ⏭ 下一回合 / ▶ 继续」—— 图标与文字分成两段,
+   手机横屏只留图标(见 web/mobile.css 的 .uc__paceLabel) */
+.uc__paceLabel { white-space: nowrap; }
 
 /* 上帝面板:只有观看模式才会被填内容(玩家模式连 innerHTML 都清空) */
 .uc__god {
@@ -1683,4 +1692,164 @@ body.is-player-mode .actionbar__hint { display: none; }
   .uc__side { width: min(240px, 40vw); }
   .uc__rank--overlay { top: 50%; max-height: 52vh; }
 }
+
+/* ============================================================ 谁是卧底:手机横屏 ===
+
+ * 断点与 web/mobile.css 完全同一套(那个文件里的注释解释了为什么用 height 而不是宽度):
+ *   主目标 `(orientation: landscape) and (max-height: 500px)` —— 实测三个目标尺寸
+ *    956×440 / 852×393 / 800×360 全部命中它。
+ *   次目标 `(max-width: 820px)` / `(max-width: 520px)` —— 竖屏与小屏兜底。
+ *
+ * ⚠️ 为什么这一段写在 styles3d.css(卧底的桌面样式就在上面),而不是 web/mobile.css
+ *   · 那个文件**只在浏览器版加载**(桌面 Electron 版不引它),而卧底在两边都要能用;
+ *   · 而且 game 的样式是「跟着游戏走」的(狼人杀/阿瓦隆的桌面样式在各自 ui/theme.js 里),
+ *     卧底的桌面样式本来就在这个文件,手机样式放在同一处,改的时候不用同时开两个文件。
+ *   三条策略直接抄扑克那份(mobile.css 顶部注释):顶栏三区定宽、侧栏/面板让开 3D、
+ *   可点元素保底 40px —— 只是这里的「侧栏」换成了上帝面板 / 描述矩阵 / 现场记录。
+ *
+ * 实测约束(三个尺寸里最紧的 800×360):
+ *   顶栏 40px;上帝面板 top 46 + max-height 40vh(144)→ 底边 190;
+ *   描述矩阵 bottom 8 + max-height 28vh(101)→ 顶边 251;
+ *   现场记录 bottom 8 + max-height 24vh(86)→ 顶边 266。
+ *   纵向三段互不重叠,中间留出约 60px 的完整横带给 3D 牌桌,
+ *   桌心(50%,55%)永远在空地上 —— 这些数字由 tools/mobilegameshots.mjs 每轮实测断言。
+ */
+@media (orientation: landscape) and (max-height: 500px) {
+
+  /* —— 顶栏:压到一行 40px。左侧信息区可压缩(省略号),右侧按钮区**一个像素都不让** ——
+     教训来自扑克那份:以前靠「能横向滚」,而滚动条被藏起来,右边的按钮等于不可达。 */
+  .uc__top {
+    height: 40px; min-height: 40px;
+    padding: 0 8px; gap: 6px;
+    align-items: center; flex-wrap: nowrap;
+    overflow: hidden;
+  }
+  .uc__brand { flex: 1 1 auto; min-width: 0; overflow: hidden; gap: 6px; }
+  /* 标题在手机上收益最低(用户已经知道自己开的什么),先让它整个让位 */
+  .uc__title { display: none; }
+  /* ⚠️ 光给 .uc__brand 设 min-width:0 还不够:子元素默认 min-width:auto(= 内容宽度),
+     照样撑住不缩。必须显式给可压缩 + 省略号三件套(与 mobile.css 里那一段同一个坑)。 */
+  .uc__brand > * {
+    flex: 0 1 auto; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  /* 轮次/阶段标签是回合推进的主要反馈,**钉住宽度**不让它被平均分摊掉 */
+  #ucRoundTag, #ucPhaseTag { flex: 0 0 auto; }
+  .uc__tag { font-size: 11px; padding: 2px 7px; }
+  .uc__topBtns { flex: 0 0 auto; min-width: max-content; gap: 4px; }
+  .uc__topBtns .btn { min-height: 40px; min-width: 40px; padding: 0 8px; font-size: 12px; white-space: nowrap; }
+
+  /* —— 面板:全部退到四角,中间那条留给 3D —— */
+  .uc__god {
+    right: 8px; top: 46px;
+    width: min(44vw, 420px); max-height: 40vh;
+    padding: 7px 9px; border-radius: 12px;
+  }
+  .uc__godHead > span:first-child { font-size: 11.5px; }
+  .uc__godHint { font-size: 10px; }
+  .uc__godTable { font-size: 11px; }
+  .uc__godTable th { padding: 2px 3px; }
+  .uc__godTable td { padding: 3px; }
+  .uc__godSay { max-width: 34vw; }
+  .uc__godGuess { font-size: 10.5px; }
+
+  .uc__matrix {
+    left: 8px; bottom: 8px;
+    max-width: min(46vw, 440px); max-height: 28vh;
+    padding: 6px 8px; border-radius: 12px;
+  }
+  .uc__mxHead { font-size: 11px; margin-bottom: 2px; }
+  .uc__mxTable { font-size: 11px; }
+
+  .uc__side {
+    right: 8px; bottom: 8px;
+    width: min(32vw, 260px); max-height: 24vh;
+    border-radius: 12px;
+  }
+  .uc__sideHead { font-size: 11px; padding: 4px 8px; }
+  .uc__log { padding: 4px 8px; font-size: 11px; line-height: 1.45; }
+
+  /* 玩家模式:我的词(左上),比上帝面板小得多 */
+  .uc__me { left: 8px; top: 46px; padding: 7px 12px; border-radius: 12px; }
+  .uc__meLabel { font-size: 10px; }
+  .uc__meWord { font-size: 20px; }
+  .uc__meHint { font-size: 11px; max-width: 46vw; }
+
+  /* —— 操作区:玩家输入/投票。手机上贴底、压到两行 —— */
+  .uc__action {
+    left: 50%; bottom: 6px; transform: translateX(-50%);
+    width: min(94vw, 720px);
+    padding: 6px 10px; border-radius: 12px;
+  }
+  .uc__actHead { font-size: 12px; margin-bottom: 4px; }
+  /* 说明性文案(猜词的代价那一整行)在手机上省掉 —— 它占两行高度,
+     而那几个字在设置页与规则说明里都有;两条操作行本身一行不少 */
+  .uc__actNote { display: none; }
+  .uc__actRow { gap: 6px; }
+  .uc__input { min-height: 40px; font-size: 13px; padding: 6px 8px; }
+  /* ⚠️ min-width 也要给:单个汉字的按钮(「说」)只有 35px 宽,手指点不准 */
+  .uc__action .btn { min-height: 40px; min-width: 44px; padding: 0 10px; font-size: 12.5px; white-space: nowrap; }
+  .uc__voteBtn { min-height: 40px; min-width: 64px; font-size: 12.5px; }
+
+  /* ★ 玩家正在操作时,底部这一整条要留给操作区:描述矩阵与现场记录往上让。
+     ⚠️ 让多少**不写死**:屏幕那边在操作区出现时量一次高度写进 --uc-act-h
+        (与扑克的 --actionbar-h 同一个做法)。写死数字的后果实测过:操作区 131px 高,
+        按 118px 让 → 矩阵底部被压住 13px,手机上「座位」那一行看不见。 */
+  .uc.is-acting .uc__matrix { bottom: calc(var(--uc-act-h, 74px) + 10px); max-height: 18vh; }
+  .uc.is-acting .uc__side { bottom: calc(var(--uc-act-h, 74px) + 10px); max-height: 18vh; }
+
+  /* 结算横幅 / toast:手机上别压住半个桌子 */
+  .uc__banner { padding: 12px 22px; max-width: 88vw; }
+  .uc__banner b { font-size: 20px; }
+  .uc__banner span { font-size: 12px; }
+  /* 本场积分(结算时那块):手机上也要收窄,别把整张桌子盖死 */
+  .uc__rank--overlay {
+    top: 50%; width: min(92vw, 520px); max-height: 78vh;
+    padding: 10px 12px; border-radius: 14px;
+  }
+  .uc__rankTable { font-size: 11px; }
+  .uc__rankTable th { padding: 2px 3px; }
+  .uc__rankTable td { padding: 3px; }
+  .uc__rank--lobby { max-height: 26vh; }
+  .uc__lobbyCard {
+    width: min(94vw, 760px); max-height: calc(100vh - 12px);
+    overflow: auto; padding: 12px 16px; border-radius: 16px;
+  }
+  .uc__fields { grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 10px 0; }
+  .uc__field select { min-height: 40px; }
+  .uc__lobbyBtns .btn { min-height: 40px; }
+}
+
+/* 竖屏 / 小屏兜底:与上面同一套策略,只是不追求「四角摆放」(竖屏高度足够)。
+   ⚠️ 必须加 min-height:501px —— 800×360 这类横屏手机**同时**命中 820 那条,
+      而它写在后面(同优先级后写者赢),会把横屏那套精心算过的 max-height
+      全部覆盖掉。实测就是这么踩的:横屏按 16vh 算好,被 820 这条的 20vh 顶回去,
+      时间线又压回桌面中间。 */
+@media (max-width: 820px) and (min-height: 501px) {
+  .uc__top { flex-wrap: nowrap; overflow: hidden; }
+  .uc__brand { flex: 1 1 auto; min-width: 0; overflow: hidden; }
+  .uc__brand > * { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .uc__topBtns { flex: 0 0 auto; min-width: max-content; }
+  .uc__topBtns .btn { min-height: 40px; }
+  .uc__god { width: min(300px, 52vw); max-height: 42vh; }
+  .uc__matrix { max-width: 62vw; max-height: 30vh; }
+  .uc__side { width: min(200px, 34vw); max-height: 26vh; }
+  .uc__action { width: 94vw; }
+  .uc__actNote { display: none; }
+  .uc__input { min-height: 40px; }
+  .uc__action .btn, .uc__voteBtn { min-height: 40px; }
+  .uc.is-acting .uc__matrix { bottom: calc(var(--uc-act-h, 74px) + 10px); max-height: 22vh; }
+  .uc.is-acting .uc__side { bottom: calc(var(--uc-act-h, 74px) + 10px); max-height: 20vh; }
+}
+
+/* 极窄屏(普通手机竖屏):顶栏只留轮次,标题与阶段让位 */
+@media (max-width: 520px) {
+  .uc__title { display: none; }
+  .uc__brand { gap: 4px; }
+  .uc__tag { font-size: 11px; padding: 2px 6px; }
+  .uc__god, .uc__me { width: 92vw; }
+  .uc__matrix { max-width: 92vw; }
+  .uc__side { width: 46vw; }
+}
+
 

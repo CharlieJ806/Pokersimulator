@@ -41,6 +41,7 @@ import { assignPersonas } from '../personas.js';
 import { MatchStandings, matchSummary as matchSummaryOf } from '../scoring.js';
 import { cleanBubble, checkReasonLeak, neutralSpeech } from '../filter.js';
 import { WEREWOLF_CSS } from './theme.js';
+import { RoundGate, ROUND_HOLD_MS } from '../../../shared/roundGate.mjs';
 import {
   characterForModel, assignAccents, GENERIC_CHAR, displayNameForModel, assignDisplayNames,
 } from '../../../ai/portraits.js';
@@ -115,6 +116,16 @@ export class WerewolfScreen {
     this._humanResolve = null;
     this.destroyed = false;
     this._seenFeed = 0;
+    /**
+     * 回合(天)之间的闸门 —— 自动停顿 1.4s + 暂停/单步。
+     * 屏幕持有它:一局重开/恢复时跟着新的 AbortSignal 重置,「暂停」不跨局保留。
+     */
+    this.roundGate = new RoundGate({
+      holdMs: ROUND_HOLD_MS,
+      onChange: (s) => this._paintPace(s),
+    });
+    /** 正在回合边界上(「第 N 天结束 → 第 N+1 天开始」),_render 用它覆盖天数标签 */
+    this._roundEnd = null;
 
     ensureStyle(root.ownerDocument || document);
 
@@ -136,6 +147,7 @@ export class WerewolfScreen {
             <span class="ww__tag" id="wwRuleTag"></span>
           </div>
           <div class="ww__topBtns">
+            <button class="btn btn--ghost" id="wwBtnPace" title="暂停在回合边界上,一天一看"><span class="ww__paceIcon">⏸</span><span class="ww__paceLabel"> 暂停</span></button>
             <button class="btn btn--ghost" id="wwBtnModels">🤖 模型</button>
             <button class="btn btn--ghost" id="wwBtnSetup">⚙ 设置</button>
             <button class="btn btn--ghost" id="wwBtnExit">↩ 退出本局</button>
@@ -221,6 +233,7 @@ export class WerewolfScreen {
       lobby: q('wwLobby'), lobbySub: q('wwLobbySub'), lobbyNote: q('wwLobbyNote'),
       seats: q('wwSeats'), rule: q('wwRule'), maxDays: q('wwMaxDays'),
       start: q('wwStart'), resume: q('wwResume'),
+      pace: q('wwBtnPace'),
     };
     this.personaMap = new Map();
     this.portraitMap = new Map();
@@ -256,6 +269,7 @@ export class WerewolfScreen {
 
     /* ---------------- 事件 ---------------- */
     q('wwBtnModels')?.addEventListener('click', () => this.hooks.onModels?.());
+    q('wwBtnPace')?.addEventListener('click', () => this._onPaceClick());
     q('wwBtnSetup')?.addEventListener('click', () => this.showLobby(this.mode));
     q('wwBtnExit')?.addEventListener('click', () => this.handleExit());
     this.dom.start?.addEventListener('click', () => { this._startNew(); });
@@ -466,6 +480,11 @@ export class WerewolfScreen {
     this.table.buildSeats(seats);
     this._render();
 
+    // ★ 换了一局就换一个信号:上一局还挂着的「暂停」不能带到新一局(否则一开就停住)
+    this._roundEnd = null;
+    this.roundGate.reset({ holdMs: ROUND_HOLD_MS, signal: this._abort.signal });
+    this._paintPace();
+
     this.runner = new WerewolfRunner({
       kernel,
       agents: this.agents,
@@ -474,6 +493,7 @@ export class WerewolfScreen {
       // ★ 玩家模式**根本不给**私有夜间行动:事件对象里连 target 字段都没有
       revealSecrets: this.mode === 'watch',
       signal: this._abort.signal,
+      roundGate: this.roundGate,
       // ★ 本场积分榜的公开快照 —— 提示词里的【你的最终目标】要用它。
       //   只有 seat / name / 积分(这张榜本来就画在侧栏上,是公开信息);
       //   身份 / 队友 / 刀口不在里面,也从这里进不去提示词。
@@ -513,6 +533,9 @@ export class WerewolfScreen {
   _teardownRun() {
     try { this.runner?.stop(); } catch { /* 忽略 */ }
     try { this._abort?.abort(); } catch { /* 忽略 */ }
+    // 闸门里可能正挂着一次「等下一回合」—— 不放掉的话退出本局会留在 await 里
+    try { this.roundGate?.clear(); } catch { /* 忽略 */ }
+    this._roundEnd = null;
     this.runner = null;
     this._abort = null;
     this.running = false;
@@ -593,6 +616,31 @@ export class WerewolfScreen {
       case 'tie':
         this._log(ev.text || '平票,无人出局');
         break;
+      case 'round': {
+        // 兼容事件:一条「新一天开始」的短日志(边界本身由 roundEnd/roundStart 负责)
+        this._log(`第 ${ev.round} 天开始`, 'ok');
+        this._persist();
+        break;
+      }
+      case 'roundEnd':
+        // ★ 回合边界。天数已经在**内核**里 +1 了,这里要同时说清「结束的是哪一天」,
+        //   否则观众看到的就是标签悄悄从 2 跳成 3 —— 像卡了一下又突然变了。
+        this._roundEnd = ev;
+        this._log(`第 ${ev.round} 天结束 → 第 ${ev.next} 天开始${ev.eliminated?.length
+          ? `(${ev.eliminated.map(seatLabel).join('、')} 被放逐)` : '(平票,无人出局)'}`, 'ok');
+        this.toast(`第 ${ev.round} 天结束 → 第 ${ev.next} 天开始`, 'ok', 2200);
+        this._persist();
+        break;
+      case 'roundStart':
+        this._roundEnd = null;
+        break;
+      case 'stepError':
+        // 一步没问出来(模型炸/解析失败)—— 降级继续,但现场记录里要看得见
+        this._log(`⚠ ${seatLabel(ev.seat)} 这一步没问出来(${ev.step}),已降级继续:${ev.message}`, 'warn');
+        break;
+      case 'repair':
+        this._log(`⚠ 状态自相矛盾(${ev.why}),已修复:${ev.fix}`, 'warn');
+        break;
       case 'end': {
         this._thinkingSeat = null;
         this._thinkingLive = false;
@@ -617,8 +665,46 @@ export class WerewolfScreen {
     this._render();
   }
 
-  _actText(ev) {
-    if (ev.action === 'kill') return `刀 ${seatLabel(ev.target)}`;
+  /* ============================================================ 节奏控制 */
+
+  /**
+   * 「暂停 / 下一回合 / 继续」—— 一个按钮三种含义,按闸门当前状态决定。
+   *
+   * 为什么需要:观看模式下一天要几十秒(夜里三步 + 一轮发言 + 一轮投票),
+   * 想停下来看上帝面板、或者让「谁被放逐」多停一会儿,原来只能干瞪眼。
+   * 三种状态**不叠加**:没暂停 → 点一下暂停;暂停且没停在边界 → 点一下继续;
+   * 暂停且停在边界 → 点一下放行**这一天**。最后这条就是幂等:
+   * 连点两下不会跳两天(闸门里只有一份等待,见 shared/roundGate.mjs)。
+   */
+  _onPaceClick() {
+    const g = this.roundGate;
+    if (!g) return;
+    // 连点两下 = 一下:第二下如果变成「继续」,就会把「暂停」整个取消掉,
+    // 在用户看来就是「点了两下下一回合,结果一路跑过去了」。350ms 内的重复点击直接忽略。
+    const now = Date.now();
+    if (now - (this._paceAt || 0) < 350) return;
+    this._paceAt = now;
+    if (!g.paused) { g.pause(); this.toast('已暂停:下一天边界会停住', 'info', 1800); }
+    else if (g.waiting) { g.step(); }
+    else { g.resume(); this.toast('继续', 'info', 1200); }
+    this._paintPace();
+  }
+
+  /** 按钮文案跟着闸门状态走(暂停中停在边界 → 「下一回合」) */
+  _paintPace(state = this.roundGate?.state) {
+    const btn = this.dom?.pace;
+    if (!btn) return;
+    const s = state || { paused: false, waiting: false };
+    const icon = btn.querySelector('.ww__paceIcon');
+    const label = btn.querySelector('.ww__paceLabel');
+    if (icon) icon.textContent = !s.paused ? '⏸' : (s.waiting ? '⏭' : '▶');
+    if (label) label.textContent = !s.paused ? ' 暂停' : (s.waiting ? ' 下一回合' : ' 继续');
+    btn.title = !s.paused ? '暂停在回合边界上,一天一看'
+      : (s.waiting ? '放行这一天(下一回合)' : '继续自动推进');
+    btn.classList.toggle('is-armed', !!(s.paused && s.waiting));
+  }
+
+  _actText(ev) {    if (ev.action === 'kill') return `刀 ${seatLabel(ev.target)}`;
     if (ev.action === 'check') return `验 ${seatLabel(ev.target)}`;
     if (ev.action === 'save') return `用解药救 ${seatLabel(ev.target)}`;
     if (ev.action === 'poison') return `用毒药毒 ${seatLabel(ev.target)}`;
@@ -678,14 +764,25 @@ export class WerewolfScreen {
     const view = buildRenderView(st, { mode: this.mode, humanSeat: this.humanSeat });
     this._lastView = view;
 
+    // 玩家模式左上角有一张「我的身份」卡,积分榜要往下让一格(否则两块面板叠在一起)。
+    // 用 class 而不是 inline style:桌面让 146px、手机横屏让 96px,规则都在 theme.js 里。
+    const shell = this.root.querySelector('.ww');
+    if (shell) shell.classList.toggle('is-join', this.mode === 'join');
+
     const night = st.phase === 'night';
     this.dom.dayTag.textContent = st.phase === 'idle' ? '未开局'
-      : night ? `第 ${st.day} 夜` : `第 ${st.day} 天 / 共 ${st.config.maxDays} 天`;
-    this.dom.phaseTag.textContent = night
-      ? `夜晚 · ${STEP_LABEL[st.nightStep] || ''}`
-      : (PHASE_LABEL[st.phase] || '');
-    this.dom.phaseTag.classList.toggle('is-night', night);
-    this.dom.phaseTag.classList.toggle('is-vote', st.phase === 'vote');
+      : this._roundEnd ? `第 ${this._roundEnd.next} 天`
+        : night ? `第 ${st.day} 夜` : `第 ${st.day} 天 / 共 ${st.config.maxDays} 天`;
+    // 回合边界上:阶段标签改成「第 N 天结束 →」,让「刚才那一天结束了」这件事
+    // 在画面上**停留**一会儿(自动推进约 1.4s;暂停时一直停着,直到按「下一回合」)
+    this.dom.phaseTag.textContent = this._roundEnd
+      ? `第 ${this._roundEnd.round} 天结束 →`
+      : night
+        ? `夜晚 · ${STEP_LABEL[st.nightStep] || ''}`
+        : (PHASE_LABEL[st.phase] || '');
+    this.dom.phaseTag.classList.toggle('is-night', night && !this._roundEnd);
+    this.dom.phaseTag.classList.toggle('is-vote', st.phase === 'vote' && !this._roundEnd);
+    this.dom.phaseTag.classList.toggle('is-boundary', !!this._roundEnd);
     this.dom.ruleTag.textContent = st.config.winCondition === 'all' ? '屠城' : '屠边';
 
     // 天黑遮罩:夜里盖上(两种模式都盖 —— 玩家也是「闭眼」的)
@@ -713,7 +810,8 @@ export class WerewolfScreen {
       labels,
       phaseText: st.phase === 'end'
         ? (st.winner === 'werewolf' ? '狼人胜' : '好人胜')
-        : night ? `第 ${st.day} 夜` : `第 ${st.day} 天 · ${PHASE_LABEL[st.phase] || ''}`,
+        : this._roundEnd ? `第 ${this._roundEnd.round} 天结束 → 第 ${this._roundEnd.next} 天`
+          : night ? `第 ${st.day} 夜` : `第 ${st.day} 天 · ${PHASE_LABEL[st.phase] || ''}`,
       phaseHint: st.phase === 'end' ? '点「设置」可以再来一局'
         : `存活 ${st.alive.filter(Boolean).length} 人 · ${st.config.winCondition === 'all' ? '屠城' : '屠边'}`,
       night,
@@ -899,6 +997,8 @@ export class WerewolfScreen {
     this._humanResolve = null;
     this.dom.action.hidden = true;
     this.dom.action.innerHTML = '';
+    // 手机上操作区会占掉底部一整条:撤掉标记,时间线/现场记录才能回到原位
+    this.root.querySelector('.ww')?.classList.remove('is-acting');
     if (r) r(result);
   }
 
@@ -907,8 +1007,24 @@ export class WerewolfScreen {
       this._humanResolve = resolve;
       this.dom.action.innerHTML = '';
       this.dom.action.hidden = false;
+      // ★ 手机横屏「时间线」和「操作区」都在底部,不加这个标记就会叠在一起
+      const shell = this.root.querySelector('.ww');
+      shell?.classList.add('is-acting');
       build(this.dom.action, (result) => this._resolveHuman(result));
+      // 操作区高度由 JS 量出来写进 CSS 变量(与扑克的 --actionbar-h 同一个做法),
+      // 时间线/现场记录用 calc() 让开它 —— 写死数字必然被改结构的人改坏。
+      // ⚠️ 同步量一次(强制布局)+ 下一帧补量一次:只靠 rAF 会拿到旧值,
+      //    面板就仍按兜底的 74px 让位,底部被操作区压掉几十像素。
+      this._measureAction();
+      requestAnimationFrame(() => this._measureAction());
     });
+  }
+
+  /** 把操作区的实测高度写进 --ww-act-h(手机横屏的面板让位靠它) */
+  _measureAction() {
+    const shell = this.root.querySelector('.ww');
+    if (!shell || !this.dom.action || this.dom.action.hidden) return;
+    shell.style.setProperty('--ww-act-h', `${Math.ceil(this.dom.action.offsetHeight)}px`);
   }
 
   /**

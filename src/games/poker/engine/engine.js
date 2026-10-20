@@ -222,6 +222,17 @@ class PokerEngine {
         name: `座位 ${i + 1}`,
         stack: s.startingStack,
         committed: 0,        // 本手牌累计投入(用于分池)
+        /**
+         * 上面那个 committed 里**属于「前注」的那一部分**(死钱)。
+         *
+         * 为什么必须单独记一笔:committed 是「本手一共掏了多少钱」,前注和真正的
+         * 下注混在一起之后,分池就没法区分「他多押了一注」和「他交了入池门票」。
+         * 边池只该由**必须被跟注的下注**产生 —— 前注根本不需要谁去跟,
+         * 所以它绝不能因为「别人没跟到这个数」被当成超额投入退回去
+         * (用户实测:大盲前注最后以「边池」的形式退回给大盲了)。
+         * 详见 buildPots / _refundUncalled。
+         */
+        anteCommitted: 0,
         betThisRound: 0,     // 本轮已下注
         hole: [null, null],
         inHand: false,
@@ -505,7 +516,7 @@ class PokerEngine {
     st.street = 'river'; st.handOver = false; st.log = [];
     st.lastResult = null; st.aggressor = null;
     for (const p of st.players) {
-      p.hole = [null, null]; p.betThisRound = 0; p.committed = 0;
+      p.hole = [null, null]; p.betThisRound = 0; p.committed = 0; p.anteCommitted = 0;
       p.folded = false; p.allIn = false; p.hasActed = false; p.lastAction = null;
       p.totalBetThisHand = 0; p.inHand = p.stack > 0;
     }
@@ -891,7 +902,7 @@ class PokerEngine {
     // 重置玩家,淘汰没筹码的
     for (const p of st.players) {
       // 底牌在这里清(上一手结束后要留给回顾,所以不能更早清)
-      p.committed = 0; p.betThisRound = 0; p.hole = [null, null];
+      p.committed = 0; p.anteCommitted = 0; p.betThisRound = 0; p.hole = [null, null];
       p.folded = false; p.allIn = false; p.hasActed = false; p.lastAction = null;
       p.totalBetThisHand = 0;
       p.inHand = p.stack > 0;
@@ -975,11 +986,20 @@ class PokerEngine {
     return this.viewForDealer();
   }
 
-  /** 把筹码从玩家手上放进本手投入。ante=true 表示这是前注:不计入本轮下注。 */
+  /**
+   * 把筹码从玩家手上放进本手投入。ante=true 表示这是前注:不计入本轮下注。
+   *
+   * 前注除了记进 committed(总投入),还要单独记进 anteCommitted ——
+   * 分池时要靠它把「死钱」和「需要被跟的下注」分开(见 buildPots 的大段注释)。
+   * 少了这一笔,大盲前注就会在结算时被当成「没人跟的超额下注」退还给大盲,
+   * 而不是被别人赢走。
+   */
   _commit(player, amount, { ante = false } = {}) {
     const amt = Math.max(0, Math.min(amount, player.stack));
     player.stack -= amt;
     player.committed += amt;
+    // 老快照里没有 anteCommitted 这个字段 —— 用 || 0 兜一下,别让 += 算出 NaN
+    if (ante) player.anteCommitted = (player.anteCommitted || 0) + amt;
     if (!ante) player.betThisRound += amt;      // 前注是死钱,不该抬高「本轮注额」
     player.totalBetThisHand += amt;
     if (player.stack === 0) player.allIn = true;
@@ -1219,7 +1239,7 @@ class PokerEngine {
         st.lastResult = { type: 'fold-win', winners: [{ seat: winner.seat, amount }], pot: amount, board: [] };
       }
       // 同摊牌路径:底池已变成筹码发出,committed 必须归零
-      for (const p of st.players) p.committed = 0;
+      for (const p of st.players) { p.committed = 0; p.anteCommitted = 0; }
       st.pot = 0;
       this._finishHand();
       return true;
@@ -1281,8 +1301,24 @@ class PokerEngine {
   }
 
   /**
+   * 这一刻「必须被人跟」的那部分投入 = committed − 前注(死钱)。
+   *
+   * 为什么退款 / 分池都只看这个数,而不是 committed:
+   *   前注(普通前注与大盲前注)是**入池门票**,不是「下注」—— 它不需要任何对手
+   *   跟注就已经属于底池了。用 committed 去比大小,大盲的前注就会变成
+   *   「他比别人多押的钱」,于是被当成没人跟的超额下注退回给他
+   *   (用户实测到了:大盲前注最后以「边池前注」的形式退回给大盲)。
+   *   前注唯一的去处是**底池**:被别人赢走。
+   */
+  _liveCommitted(p) {
+    return Math.max(0, (p?.committed || 0) - (p?.anteCommitted || 0));
+  }
+
+  /**
    * 退回未被跟注的多余下注。
    * committed 与 betThisRound 必须同步减少,否则 totalPot() 会把退回的筹码又算一次。
+   *
+   * ⚠️ 比较的是 `_liveCommitted`(不含前注) —— 前注永远不在这条路径上退。
    *
    * @param {boolean} foldedCountsAsCaller
    *   true —— 算上已弃牌玩家的投入。只剩一家没弃牌时必须这样算:
@@ -1295,15 +1331,15 @@ class PokerEngine {
     if (alive.length === 0) return 0;
     let sorted;
     if (alive.length === 1 && !foldedCountsAsCaller) {
-      // 只剩一家:没人跟他的注,全部退回
-      sorted = [alive[0], { committed: 0 }];
+      // 只剩一家:没人跟他的注,他**下注**的部分全部退回(前注仍留在池里)
+      sorted = [alive[0], { committed: 0, anteCommitted: 0 }];
     } else {
       const pool = foldedCountsAsCaller ? st.players.filter((p) => p.inHand) : alive;
-      sorted = [...pool].sort((a, b) => b.committed - a.committed);
+      sorted = [...pool].sort((a, b) => this._liveCommitted(b) - this._liveCommitted(a));
     }
     if (sorted.length < 2) return 0;
     const top = sorted[0], second = sorted[1];
-    const excess = top.committed - second.committed;
+    const excess = this._liveCommitted(top) - this._liveCommitted(second);
     if (excess > 0) {
       top.committed -= excess;
       top.betThisRound = Math.max(0, top.betThisRound - excess);
@@ -1343,27 +1379,62 @@ class PokerEngine {
 
   /**
    * 构建主池 + 边池。
-   * 每一层(level)只有「投入 >= level」的玩家参与,金额 = (level - 上一层) × 该层参与人数。
+   * 每一层(level)只有「**下注**额 >= level」的玩家参与,金额 = (level - 上一层) × 该层参与人数。
    * 相邻两层如果参与者完全相同,就合并成一个池展示(注意不能直接累加金额,
    * 因为每人的份额 slice 不同,必须分别算好再相加)。
+   *
+   * ★ 前注(死钱)不进层次计算,而是**整块并进最下面那一层(主池)**。
+   *   为什么必须这样 —— 这是「大盲前注被当成边池退回去」的根因:
+   *   以前层次是按 committed(总投入)切的,而大盲前注让大盲的 committed 比
+   *   其他所有人大出「一个前注」。那多出来的一层里**只有大盲一个人有资格**,
+   *   于是 buildPots 造出一个「边池」,摊牌时不管牌力如何都判给大盲 ——
+   *   等于把前注原样退回给他。前注是盲注义务的一部分,是**已经投进底池的钱**,
+   *   按正常底池规则该被牌最大的人赢走,绝不能因为「他的投入比别人多」而退回。
+   *
+   *   把前注当成「死钱进主池」还顺带修好了普通前注的同类问题:
+   *   短码只出得起一部分前注时,旧算法也会把别人的前注差做成一个只有长码能赢的层。
+   *
+   * ⚠️ 层次一律用 `_liveCommitted`(committed − anteCommitted),这一点别改回去:
+   *    改成 committed 就会重新长出「前注边池」。
    */
   buildPots() {
     const st = this.state;
-    const contributors = st.players.filter((p) => p.committed > 0);
-    const levels = [...new Set(contributors.map((p) => p.committed))].sort((a, b) => a - b);
+    const live = (p) => this._liveCommitted(p);
+    // 死钱 = 所有参与本手的人交的前注(含已弃牌者:他们的前注也在池里)
+    const dead = st.players.reduce((s, p) => s + (p.inHand ? (p.anteCommitted || 0) : 0), 0);
+    const contributors = st.players.filter((p) => live(p) > 0);
+    const levels = [...new Set(contributors.map(live))].sort((a, b) => a - b);
     const pots = [];
     let prev = 0;
+    // 「只交得起前注」的人(筹码比前注还少,前注就把他打全下了):
+    // 他不能参与下注层的分池(他没跟过任何下注),但前注那笔死钱里应该有他一份。
+    // 所以这种情况下死钱单独作为主池,下注层从边池 1 起算。
+    // (已经弃牌的人不算:他的前注本来就该被别人赢走,并进主池就行)
+    const anteOnly = st.players.filter((p) => p.inHand && !p.folded && p.committed > 0 && live(p) === 0);
+    // 凡是「本手有投入」的人都算参与者(含已弃牌者:他们是被动投入的死钱,
+    // 必须有人能赢走这些筹码;真正拿不到钱由 _showdown 里的 !p.folded 过滤)
+    const contributedSeats = st.players.filter((p) => p.inHand && p.committed > 0).map((p) => p.seat);
+    // 极端情况下某一层可能一个活人都没有 —— 那笔钱不能凭空消失,先记下来并入主池
+    let orphan = 0;
     for (const level of levels) {
       const slice = level - prev;
-      const participants = st.players.filter((p) => p.committed >= level);
+      const participants = st.players.filter((p) => live(p) >= level);
       const amount = slice * participants.length;
-      // 资格 = 本手参与者(含已弃牌者:他们是被动投入的死钱,必须有人能赢走这些筹码)
       const eligible = participants.filter((p) => p.inHand).map((p) => p.seat);
       prev = level;
-      if (amount <= 0 || eligible.length === 0) continue;
+      if (amount <= 0) continue;
+      if (eligible.length === 0) { orphan += amount; continue; }
       const last = pots[pots.length - 1];
       if (last && last.eligible.join(',') === eligible.join(',')) last.amount += amount;
       else pots.push({ amount, eligible });
+    }
+    if (dead > 0) {
+      if (anteOnly.length || !pots.length) pots.unshift({ amount: dead, eligible: contributedSeats });
+      else pots[0].amount += dead;
+    }
+    if (orphan > 0) {
+      if (pots.length) pots[0].amount += orphan;
+      else if (contributedSeats.length) pots.push({ amount: orphan, eligible: contributedSeats });
     }
     return pots;
   }
@@ -1444,9 +1515,26 @@ class PokerEngine {
       carry = 0;
     }
 
+    /**
+     * 结算守恒自检:**底池里的每一分钱都必须有人赢走**。
+     *
+     * 为什么要在引擎里也留一条(测试里已经有更硬的断言):
+     *   「有筹码凭空消失」是这类分池 bug 最致命的表现,而它很难从界面上看出来
+     *   (总筹码少了几十,玩家只会觉得「我记错了」)。这里在摊牌当场比一次
+     *   「池子总额」与「派彩总额」,对不上就写进牌局记录 —— 玩家上报 bug 时
+     *   这条日志能直接定位到是哪一手、哪个池。
+     * 不抛错:牌局不能因为自检而中断;能照常发完钱就先发完。
+     */
+    const potTotal = pots.reduce((s, p) => s + p.amount, 0);
+    const paidTotal = [...payouts.values()].reduce((s, v) => s + v, 0);
+    if (potTotal !== paidTotal) {
+      this._log(`⚠️ 结算异常:底池 ${potTotal} 与派彩 ${paidTotal} 不一致(请把这一手报给开发者)`, 'info');
+    }
+
     for (const [seat, amt] of payouts) this._award(seat, amt);
     // 底池已经变成筹码发回给玩家,committed 必须归零,否则会被重复计入筹码总量
-    for (const p of st.players) p.committed = 0;
+    // (anteCommitted 是 committed 的一个子集,必须跟着一起清,否则下一手会带着上一手的前注分池)
+    for (const p of st.players) { p.committed = 0; p.anteCommitted = 0; }
     st.pot = 0;
     const reveal = alive.map((p) => ({
       seat: p.seat, name: p.name, hole: p.hole.slice(), handName: p._handName, score: p._score,
@@ -1729,4 +1817,70 @@ class PokerEngine {
   }
 }
 
-export { PokerEngine, DEFAULT_SETTINGS, STREET_LABEL, CAT, evaluate, compare, describe };
+/**
+ * 每一条街的成牌 —— 给提示词用(「这个成牌是哪一街成的」)。
+ *
+ * 为什么要有这个东西:
+ *   用户实测反馈「AI 分不清是什么时候成的牌(比如翻牌圈就成的牌,河牌圈也以为
+ *   是刚成的牌)」。光给一个「你现在的成牌」是不够的 —— 模型不知道自己**什么时候**
+ *   拿到它的,于是在转牌/河牌把一手早就在的牌说成「刚中」。
+ *
+ * 为什么放在引擎这一层算:
+ *   · 牌型判定必须和摊牌**同一套** evaluate/describe(短牌还牵涉类别重排),
+ *     在提示词那边再写一份,迟早会出现「提示词说两对、摊牌说三条」;
+ *   · 街道边界(公共牌第 3/4/5 张)是引擎的概念,不该让 agent 自己数。
+ *   所以这里只做纯计算,不做任何排版 —— 怎么写成中文交给 agent。
+ *
+ * ⚠️ **只用已经发出的公共牌**:翻牌圈(board 只有 3 张)时绝不能偷看第 4、5 张 ——
+ *    那属于未来信息,提示词里出现就等于作弊。所以按 board.length 一街一街地截。
+ *
+ * @param {number[]} hole  自己的两张底牌
+ * @param {number[]} board 公共牌(可能 0 / 3 / 4 / 5 张)
+ * @param {{shortDeck?:boolean}} [opts]
+ * @returns {null|{
+ *   streets: Array<{street:string, boardLen:number, name:string, score:number[]}>,
+ *   current: {street:string, name:string, score:number[]}|null,
+ *   formed: {street:string, name:string}|null,
+ *   prev: {street:string, name:string}|null,
+ *   changedNow: boolean
+ * }}
+ *   null —— 底牌不全(还没发牌),调用方应当不写「成牌」这句;
+ *   streets 为空 —— 翻前(还没有公共牌),谈不上「哪一街成的」。
+ */
+function handByStreet(hole, board, { shortDeck = false } = {}) {
+  const holes = (hole || []).filter((c) => c !== null && c !== undefined);
+  const cards = (board || []).filter((c) => c !== null && c !== undefined);
+  if (holes.length < 2) return null;
+  const opts = { shortDeck: !!shortDeck };
+  // 街名与「到这一街为止公共牌该有几张」
+  const STEPS = [['flop', 3], ['turn', 4], ['river', 5]];
+  const streets = [];
+  for (const [street, n] of STEPS) {
+    if (cards.length < n) break;
+    const score = evaluate([...holes, ...cards.slice(0, n)], opts);
+    streets.push({ street, boardLen: n, name: describe(score, opts), score });
+  }
+  if (!streets.length) return { streets: [], current: null, formed: null, prev: null, changedNow: false };
+  const current = streets[streets.length - 1];
+  /**
+   * 「哪一街成的」按**牌型名**找第一次与当前一致的那一街。
+   *
+   * 为什么用名字比而不是用分数比:分数变化包含踢脚牌这类模型看不见的细节,
+   * 会出现「一对 A → 一对 A」这种对模型毫无意义的变化(名字一样却说「刚变了」,
+   * 反而把它绕晕)。名字是模型在提示词里看到的那个说法,一致就算没变。
+   * 顺带保证单调:公共牌只增不减,牌型名只会越变越强,不会「变回去」。
+   */
+  const formedIdx = streets.findIndex((s) => s.name === current.name);
+  const formed = streets[formedIdx] || current;
+  const prev = formedIdx > 0 ? streets[formedIdx - 1] : null;
+  return {
+    streets: streets.map((s) => ({ street: s.street, boardLen: s.boardLen, name: s.name })),
+    current: { street: current.street, name: current.name },
+    formed: { street: formed.street, name: formed.name },
+    prev: prev ? { street: prev.street, name: prev.name } : null,
+    // 「就是这一街变的」—— 翻牌圈成的牌不算「变了」,那是第一次成牌(见 agent 的措辞)
+    changedNow: formed.street === current.street && formed.street !== 'flop',
+  };
+}
+
+export { PokerEngine, DEFAULT_SETTINGS, STREET_LABEL, CAT, evaluate, compare, describe, handByStreet };

@@ -17,11 +17,31 @@
  *   · 投票是**并行**请求、**一起**记录 —— 标准玩法里所有人同时亮票,
  *     所以不能让后投的人看到前面的人的票(那是狼人杀那种逐票揭晓的节奏,在这里是规则错误);
  *   · 上车投卡也是**并行**(互不依赖),投完只公布合计。
+ *
+ * ⚠️ 回合推进(一轮 = 一次上车 + 一次任务)的三条硬规矩
+ *   1. 轮次号只有内核会改(quest 结算里 round += 1);runner 只从**账本**里观察它,
+ *      发现「新一轮」那条账本出现就广播「第 N 轮结束」→ 过闸门 → 广播「第 N+1 轮开始」。
+ *   2. 一次结算只推进一轮:游标是 `_lastRound`,单调递增;账本里同一条 round 事件
+ *      被读到两次(比如恢复后重放)也不会再推进一次 —— `_seenEvents` 已经吃掉它了。
+ *   3. 任何一步问不出来都不许把对局停死:提名不合法→确定性队伍、投票失败→反对、
+ *      投卡失败→成功、刺杀不合法→座位号最小的别人;状态坏到没有下一步就抛带原因的错。
+ *      (用户实测的「一回合结束后画面完全不动」就是这条路走死了。)
  */
 
 import { buildView } from './view.js';
 import { fallbackSay } from './prompts.js';
 import { CANCEL_MESSAGE } from '../../shared/llmCaller.mjs';
+import { RoundGate } from '../../shared/roundGate.mjs';
+
+/** 这次错误是不是「本局被取消/退出」—— 那种错误要原样往上抛,不能当普通失败吞掉 */
+function isCancel(err, signal) {
+  return !!signal?.aborted || err?.message === CANCEL_MESSAGE || !!err?.canceled;
+}
+
+/** 中文回合名(事件与界面共用一份) */
+export function roundLabel(n) {
+  return `第 ${n} 轮`;
+}
 
 /** 可被 abort 打断的等待(退出本局 / 重开时立刻停,不要睡完再发现已经取消) */
 function sleep(ms, signal) {
@@ -50,11 +70,14 @@ export class AvalonRunner {
    * @param {boolean} [opts.revealSecrets] 是否允许把**私有**信息(谁出了失败卡、
    *   刺客的思考)写进事件(上帝视角 true;玩家模式 false —— 这是「渲染前就不取」
    *   在事件层的落点:false 时事件里根本没有 card 字段,屏幕不可能画出来)
+   * @param {RoundGate} [opts.roundGate] 回合之间的闸门:自动停顿 + 暂停/单步。
+   *   不传就建一个 holdMs:0 的 —— 纯 Node 测试的行为与以前完全一致。
    * @param {AbortSignal} [opts.signal]
    */
   constructor({
     kernel, agents = new Map(), human = null, hooks = {},
     delayMs = 0, revealSecrets = false, signal = null,
+    roundGate = null,
   } = {}) {
     if (!kernel) throw new Error('AvalonRunner 需要 kernel');
     this.kernel = kernel;
@@ -64,11 +87,16 @@ export class AvalonRunner {
     this.delayMs = Math.max(0, Number(delayMs) || 0);
     this.revealSecrets = !!revealSecrets;
     this.signal = signal || null;
+    this.roundGate = roundGate instanceof RoundGate
+      ? roundGate
+      : new RoundGate({ holdMs: 0, signal: this.signal });
     this.running = false;
     this._stopped = false;
     this._ended = false;
     /** 已经广播到账本的哪一条(避免重复发事件) */
     this._seenEvents = 0;
+    /** 上一次观察到的轮次(回合边界的唯一游标) */
+    this._lastRound = kernel.state.round || 0;
   }
 
   get state() { return this.kernel.state; }
@@ -83,6 +111,9 @@ export class AvalonRunner {
    *
    * 「接着跑」是快照恢复的关键:恢复出来的 state 可能停在投票中间(有人已经投过了)、
    * 或任务卡投到一半,这里一律从 kernel 的当前状态继续,不假设「一定从头开始」。
+   *
+   * ⚠️ for(;;) 里**没有一条 `continue` 是空转**:每个分支要么 await 一次真正的
+   *    调用/停顿,要么让内核把状态推进一步。以前那几条 `continue` 在坏状态下是死转。
    */
   async run() {
     if (this.running) return;
@@ -92,6 +123,7 @@ export class AvalonRunner {
     try {
       if (this.kernel.state.phase === 'idle') {
         this.kernel.start(this.hooks.names || []);
+        this._lastRound = this.kernel.state.round;
         this._emit('start', {
           round: this.kernel.state.round,
           seats: this.kernel.state.config.seats,
@@ -99,32 +131,39 @@ export class AvalonRunner {
           leader: this.kernel.state.leader,
         });
         // 把 start/round 这两条账本事件也放出去(界面的「第 1 轮」就是从这里来的)
-        this._drainLedger();
+        await this._emitLedger(this._takeLedger());
       }
       let guard = 0;
       for (;;) {
         if (this._shouldStop()) return;
-        if (guard++ > 400) throw new Error('阿瓦隆流程没有推进(状态机出错)');
+        if (guard++ > this._stepBudget()) throw new Error('阿瓦隆流程没有推进(状态机出错)');
         const st = this.kernel.state;
         if (st.phase === 'end') { this._emitEnd(); return; }
 
         if (st.phase === 'team') {
           const leader = this.kernel.currentLeader();
-          if (leader === null) continue;
+          if (leader === null) {
+            // 没有队长就没有下一步:让内核自己把它推一格(不应发生,发生了也不能死转)
+            throw new Error('组队轮找不到队长 —— 状态被写坏了');
+          }
           await this._propose(leader);
           await this._pause();
           continue;
         }
         if (st.phase === 'vote') {
           const pending = this.kernel.pendingVoters();
-          if (!pending.length) continue;
+          if (!pending.length) {
+            throw new Error('投票轮没有待投的人 —— 状态被写坏了(票已满却不结算)');
+          }
           await this._vote(pending);
           await this._pause();
           continue;
         }
         if (st.phase === 'mission') {
           const actors = this.kernel.pendingMissionActors();
-          if (!actors.length) continue;
+          if (!actors.length) {
+            throw new Error('任务轮没有待投卡的人 —— 状态被写坏了');
+          }
           await this._mission(actors);
           await this._pause();
           continue;
@@ -139,6 +178,37 @@ export class AvalonRunner {
     } finally {
       this.running = false;
     }
+  }
+
+  /** 步数预算:正常一局是 5 轮 × (提名 + 票 + 卡) + 刺杀,给足余量后必须停下 */
+  _stepBudget() {
+    return 400;
+  }
+
+  /**
+   * 回合边界:广播「第 N 轮结束」→ 等闸门 → 由调用方接着广播「第 N+1 轮开始」。
+   *
+   * 为什么由账本里的 `round` 事件驱动而不是自己数轮次:轮次是谁改的、什么时候改的,
+   * 只有内核知道(任务结算里 round += 1)。账本是唯一真相源,读它就不会和内核算漂。
+   * @returns {Promise<boolean>} 是否真的跨过了一个边界
+   */
+  async _roundBoundary() {
+    const st = this.kernel.state;
+    const prev = this._lastRound;
+    if (st.round === prev) return false;
+    this._lastRound = st.round;
+    const quest = st.quests[st.quests.length - 1] || null;
+    this._emit('roundEnd', {
+      round: prev,
+      next: st.round,
+      label: roundLabel(prev),
+      nextLabel: roundLabel(st.round),
+      ...(quest ? { result: quest.result, fails: quest.fails } : {}),
+      alive: st.alive.filter(Boolean).length,
+    });
+    await this.roundGate.waitBoundary({ round: st.round, label: roundLabel(st.round) });
+    if (this._shouldStop()) throw new Error(CANCEL_MESSAGE);
+    return true;
   }
 
   async _pause() {
@@ -164,11 +234,25 @@ export class AvalonRunner {
     });
   }
 
-  /** 广播账本里**新出现的**那几条关键事件(票型/任务结果/强制上车) */
-  _drainLedger() {
+  /**
+   * 取走账本里**新出现的**那几条(同步,只推进游标)。
+   *
+   * 拆成「取」和「发」两步,是因为「发」里可能要 await 回合闸门(暂停/单步),
+   * 而账本是同步追加的 —— 混在一起写会让 `_seenEvents` 在 await 之后才更新,
+   * 恢复/重入时就可能把同一条账本发两次。
+   */
+  _takeLedger() {
     const st = this.kernel.state;
-    const fresh = st.events.slice(this._seenEvents);
+    const fresh = st.events.slice(this._seenEvents || 0);
     this._seenEvents = st.events.length;
+    return fresh;
+  }
+
+  /**
+   * 广播账本里那几条关键事件(票型/任务结果/强制上车/新一轮)。
+   * @param {object[]} fresh `_takeLedger()` 取到的那一批
+   */
+  async _emitLedger(fresh) {
     for (const e of fresh) {
       if (e.kind === 'votes') {
         this._emit('votes', {
@@ -193,12 +277,21 @@ export class AvalonRunner {
       } else if (e.kind === 'assassinateStart') {
         this._emit('assassinateStart', { round: e.round });
       } else if (e.kind === 'round') {
+        // ★ 回合边界:先把「第 N 轮结束」报出去、过闸门,再报「第 N+1 轮开始」
+        const crossed = await this._roundBoundary();
         this._emit('round', {
           round: this.kernel.state.round,
           teamSize: this.kernel.teamSize(),
           failNeed: this.kernel.failNeed(),
           leader: this.kernel.state.leader,
         });
+        if (crossed) {
+          this._emit('roundStart', {
+            round: this.kernel.state.round,
+            label: roundLabel(this.kernel.state.round),
+            phase: this.kernel.state.phase,
+          });
+        }
       }
     }
   }
@@ -219,6 +312,11 @@ export class AvalonRunner {
         if (!agent) throw new Error(`${seat + 1} 号既不是玩家也没有 AI —— 这一局开不起来`);
         res = await agent.proposeTeam(view, { signal: this.signal });
       }
+    } catch (err) {
+      // 队长这一问炸了不该让整局停死:下面那条「队伍非法 → 确定性队伍」会接住
+      if (isCancel(err, this.signal) || this._shouldStop()) throw err;
+      this._emit('stepError', { seat, step: 'propose', message: String(err?.message || err) });
+      res = { team: [], say: [] };
     } finally {
       this.hooks.onThinking?.(null, '', false);
     }
@@ -251,7 +349,7 @@ export class AvalonRunner {
       quality: res?.quality === 'low' ? 'low' : 'ok',
       filtered: res?.filtered || null,
     });
-    this._drainLedger();
+    await this._emitLedger(this._takeLedger());
   }
 
   /* ------------------------------------------------------------ 投票 */
@@ -292,7 +390,7 @@ export class AvalonRunner {
       }
     }
     const bySeat = new Map(results.map((r) => [r.seat, r]));
-    this._drainLedger();
+    await this._emitLedger(this._takeLedger());
     // 「每个人投票时的私密理由」只给调试用:界面在 **观看模式** 下把它当一条
     // 可选的旁白(见 ui/screen.js 的 voteThoughts 分支),玩家模式下不读。
     this._emit('voteThoughts', {
@@ -350,7 +448,7 @@ export class AvalonRunner {
         try { this.kernel.playCard(seat, 'success'); } catch { /* 兜到这儿说明状态真坏了 */ }
       }
     }
-    this._drainLedger();
+    await this._emitLedger(this._takeLedger());
   }
 
   /* ------------------------------------------------------------ 刺杀 */
@@ -370,6 +468,12 @@ export class AvalonRunner {
         if (!agent) throw new Error(`${seat + 1} 号既不是玩家也没有 AI —— 这一局开不起来`);
         res = await agent.assassinate(view, { signal: this.signal });
       }
+    } catch (err) {
+      // 刺杀是最后一个动作:这一问炸了也要给出**确定性**的刀口(座位号最小的别人),
+      // 否则整局卡在 assassinate 阶段永远不结算。
+      if (isCancel(err, this.signal) || this._shouldStop()) throw err;
+      this._emit('stepError', { seat, step: 'assassinate', message: String(err?.message || err) });
+      res = { target: null };
     } finally {
       this.hooks.onThinking?.(null, '', false);
     }
@@ -393,7 +497,7 @@ export class AvalonRunner {
       thinking: res?.thinking || '',
       source: res?.source || 'llm',
     });
-    this._drainLedger();
+    await this._emitLedger(this._takeLedger());
     this._emitEnd();
   }
 }

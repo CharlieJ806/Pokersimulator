@@ -41,6 +41,7 @@ import { MatchStandings } from '../scoring.js';
 import { cleanBubble, checkReasonLeak, neutralReason } from '../filter.js';
 import { roleLabel, rosterText } from '../engine/kernel.js';
 import { AVALON_CSS } from './theme.js';
+import { RoundGate, ROUND_HOLD_MS } from '../../../shared/roundGate.mjs';
 import {
   characterForModel, assignAccents, GENERIC_CHAR, displayNameForModel, assignDisplayNames,
 } from '../../../ai/portraits.js';
@@ -106,6 +107,16 @@ export class AvalonScreen {
     /** 本轮票型(还没揭晓时为空;揭晓后是 [{seat,approve,reason}]) —— 只用于画牌 */
     this.liveVotes = [];
     this.liveCards = [];
+    /**
+     * 回合之间的闸门 —— 自动停顿 1.4s + 暂停/单步。
+     * 屏幕持有它:一局重开/恢复时跟着新的 AbortSignal 重置,「暂停」不跨局保留。
+     */
+    this.roundGate = new RoundGate({
+      holdMs: ROUND_HOLD_MS,
+      onChange: (s) => this._paintPace(s),
+    });
+    /** 正在回合边界上(「第 N 轮结束 → 第 N+1 轮开始」),_render 用它覆盖轮次标签 */
+    this._roundEnd = null;
     this._busy = false;
 
     ensureStyle(root.ownerDocument || document);
@@ -124,6 +135,7 @@ export class AvalonScreen {
             <span class="av__tag" id="avRuleTag"></span>
           </div>
           <div class="av__topBtns">
+            <button class="btn btn--ghost" id="avBtnPace" title="暂停在回合边界上,一轮一看"><span class="av__paceIcon">⏸</span><span class="av__paceLabel"> 暂停</span></button>
             <button class="btn btn--ghost" id="avBtnModels">🤖 模型</button>
             <button class="btn btn--ghost" id="avBtnSetup">⚙ 设置</button>
             <button class="btn btn--ghost" id="avBtnExit">↩ 退出本局</button>
@@ -207,6 +219,7 @@ export class AvalonScreen {
       lobby: q('avLobby'), lobbySub: q('avLobbySub'), lobbyNote: q('avLobbyNote'),
       seats: q('avSeats'), variant: q('avVariant'),
       start: q('avStart'), resume: q('avResume'),
+      pace: q('avBtnPace'),
     };
     this.personaMap = new Map();
     this.portraitMap = new Map();
@@ -242,6 +255,7 @@ export class AvalonScreen {
 
     /* ---------------- 事件 ---------------- */
     q('avBtnModels')?.addEventListener('click', () => this.hooks.onModels?.());
+    q('avBtnPace')?.addEventListener('click', () => this._onPaceClick());
     q('avBtnSetup')?.addEventListener('click', () => this.showLobby(this.mode));
     q('avBtnExit')?.addEventListener('click', () => this.handleExit());
     this.dom.start?.addEventListener('click', () => { this._startNew(); });
@@ -447,6 +461,11 @@ export class AvalonScreen {
     this.table.buildSeats(seats);
     this._render();
 
+    // ★ 换了一局就换一个信号:上一局还挂着的「暂停」不能带到新一局(否则一开就停住)
+    this._roundEnd = null;
+    this.roundGate.reset({ holdMs: ROUND_HOLD_MS, signal: this._abort.signal });
+    this._paintPace();
+
     this.runner = new AvalonRunner({
       kernel,
       agents: this.agents,
@@ -455,6 +474,7 @@ export class AvalonScreen {
       // ★ 玩家模式**根本不给**私有信息:事件里连 card 字段都没有
       revealSecrets: this.mode === 'watch',
       signal: this._abort.signal,
+      roundGate: this.roundGate,
       hooks: {
         names,
         onEvent: (ev) => this._onEvent(ev),
@@ -483,6 +503,9 @@ export class AvalonScreen {
   _teardownRun() {
     try { this.runner?.stop(); } catch { /* 忽略 */ }
     try { this._abort?.abort(); } catch { /* 忽略 */ }
+    // 闸门里可能正挂着一次「等下一回合」—— 不放掉的话退出本局会留在 await 里
+    try { this.roundGate?.clear(); } catch { /* 忽略 */ }
+    this._roundEnd = null;
     this.runner = null;
     this._abort = null;
     this.running = false;
@@ -502,6 +525,25 @@ export class AvalonScreen {
         this.liveCards = [];
         this._log(`第 ${ev.round} 轮:要 ${ev.teamSize} 人上车,需要 ${ev.failNeed} 张失败票;`
           + `队长 ${seatLabel(ev.leader)}`, 'ok');
+        break;
+      case 'roundEnd':
+        // ★ 回合边界。轮次已经在**内核**里 +1 了,这里要同时说清「结束的是哪一轮」,
+        //   否则观众看到的就是标签悄悄从 2 跳成 3 —— 像卡了一下又突然变了。
+        this._roundEnd = ev;
+        this._log(`第 ${ev.round} 轮结束 → 第 ${ev.next} 轮开始${ev.result
+          ? `(这一轮任务${ev.result === 'success' ? '成功' : '失败'})` : ''}`, 'ok');
+        this.toast(`第 ${ev.round} 轮结束 → 第 ${ev.next} 轮开始`, 'ok', 2200);
+        this._persist();
+        break;
+      case 'roundStart':
+        this._roundEnd = null;
+        break;
+      case 'stepError':
+        // 一步没问出来(模型炸/解析失败)—— 降级继续,但现场记录里要看得见
+        this._log(`⚠ ${seatLabel(ev.seat)} 这一步没问出来(${ev.step}),已降级继续:${ev.message}`, 'warn');
+        break;
+      case 'repair':
+        this._log(`⚠ 状态自相矛盾(${ev.why}),已修复:${ev.fix}`, 'warn');
         break;
       case 'leader':
         this._log(`第 ${ev.round} 轮第 ${ev.proposalNo} 次提名:${seatLabel(ev.seat)} 是队长`);
@@ -602,6 +644,45 @@ export class AvalonScreen {
     this._render();
   }
 
+  /* ============================================================ 节奏控制 */
+
+  /**
+   * 「暂停 / 下一回合 / 继续」—— 一个按钮三种含义,按闸门当前状态决定。
+   *
+   * 为什么需要:观看模式下一轮要几十秒(提名 + 全员投票 + 上车投卡),
+   * 想停下来看上帝面板、或者让「这一轮任务成没成」多停一会儿,原来只能干瞪眼。
+   * 三种状态**不叠加**:没暂停 → 点一下暂停;暂停且没停在边界 → 点一下继续;
+   * 暂停且停在边界 → 点一下放行**这一轮**。最后这条就是幂等:
+   * 连点两下不会跳两轮(闸门里只有一份等待,见 shared/roundGate.mjs)。
+   */
+  _onPaceClick() {
+    const g = this.roundGate;
+    if (!g) return;
+    // 连点两下 = 一下:第二下如果变成「继续」,就会把「暂停」整个取消掉,
+    // 在用户看来就是「点了两下下一回合,结果一路跑过去了」。350ms 内的重复点击直接忽略。
+    const now = Date.now();
+    if (now - (this._paceAt || 0) < 350) return;
+    this._paceAt = now;
+    if (!g.paused) { g.pause(); this.toast('已暂停:下一回合边界会停住', 'info', 1800); }
+    else if (g.waiting) { g.step(); }
+    else { g.resume(); this.toast('继续', 'info', 1200); }
+    this._paintPace();
+  }
+
+  /** 按钮文案跟着闸门状态走(暂停中停在边界 → 「下一回合」) */
+  _paintPace(state = this.roundGate?.state) {
+    const btn = this.dom?.pace;
+    if (!btn) return;
+    const s = state || { paused: false, waiting: false };
+    const icon = btn.querySelector('.av__paceIcon');
+    const label = btn.querySelector('.av__paceLabel');
+    if (icon) icon.textContent = !s.paused ? '⏸' : (s.waiting ? '⏭' : '▶');
+    if (label) label.textContent = !s.paused ? ' 暂停' : (s.waiting ? ' 下一回合' : ' 继续');
+    btn.title = !s.paused ? '暂停在回合边界上,一轮一看'
+      : (s.waiting ? '放行这一轮(下一回合)' : '继续自动推进');
+    btn.classList.toggle('is-armed', !!(s.paused && s.waiting));
+  }
+
   /** 结算时把这一局记进本场积分榜,返回这一局的 score 行 */
   _recordScore() {
     if (!this.kernel) return [];
@@ -660,8 +741,13 @@ export class AvalonScreen {
     this._lastView = view;
 
     this.dom.roundTag.textContent = st.phase === 'idle' ? '未开局' : `第 ${st.round} 轮 / 共 5 轮`;
-    this.dom.phaseTag.textContent = PHASE_LABEL[st.phase] || '';
-    this.dom.phaseTag.classList.toggle('is-vote', st.phase === 'vote');
+    // 回合边界上:阶段标签改成「第 N 轮结束 →」,让「刚才那一轮结束了」这件事
+    // 在画面上**停留**一会儿(自动推进约 1.4s;暂停时一直停着,直到按「下一回合」)
+    this.dom.phaseTag.textContent = this._roundEnd
+      ? `第 ${this._roundEnd.round} 轮结束 →`
+      : (PHASE_LABEL[st.phase] || '');
+    this.dom.phaseTag.classList.toggle('is-vote', st.phase === 'vote' && !this._roundEnd);
+    this.dom.phaseTag.classList.toggle('is-boundary', !!this._roundEnd);
     this.dom.phaseTag.classList.toggle('is-mission', st.phase === 'mission' || st.phase === 'assassinate');
     this.dom.ruleTag.textContent = `${st.config.variant === 'plain' ? '简化版' : '完整版'} · `
       + `${st.config.seats} 人`;
@@ -684,8 +770,11 @@ export class AvalonScreen {
     if (this.mode === 'watch') this._renderGod(view);
     else this.dom.god.innerHTML = '';
 
-    // 玩家模式左上角已经有一张「你的身份」卡,积分榜要往下让一格(否则两块面板叠在一起)
-    if (this.dom.score) this.dom.score.style.top = this.mode === 'join' ? '210px' : '92px';
+    // 玩家模式左上角已经有一张「你的身份」卡,积分榜要往下让一格(否则两块面板叠在一起)。
+    // ⚠️ 这里**写 class 而不是 inline style**:手机横屏那两个尺寸下要让多少完全不一样
+    //    (桌面 210px,手机 100px),inline 样式会把媒体查询整条压死。规则写在 theme.js 里。
+    const shell = this.root.querySelector('.av');
+    if (shell) shell.classList.toggle('is-join', this.mode === 'join');
 
     if (this.mode === 'join') this._renderMe(view);
     this._renderFeed();
@@ -698,7 +787,8 @@ export class AvalonScreen {
       labels,
       phaseText: st.phase === 'end'
         ? (st.winner === 'good' ? '好人胜' : '坏人胜')
-        : st.phase === 'assassinate' ? '刺杀' : `第 ${st.round} 轮 · ${PHASE_LABEL[st.phase] || ''}`,
+        : this._roundEnd ? `第 ${this._roundEnd.round} 轮结束 → 第 ${this._roundEnd.next} 轮`
+          : st.phase === 'assassinate' ? '刺杀' : `第 ${st.round} 轮 · ${PHASE_LABEL[st.phase] || ''}`,
       phaseHint: st.phase === 'end' ? '点「设置」可以再来一局'
         : `要 ${this.kernel.teamSize()} 人上车 · ${this.kernel.failNeed()} 票失败 · 队长 ${seatLabel(st.leader)}`,
       quests,
@@ -909,6 +999,8 @@ export class AvalonScreen {
     this._humanResolve = null;
     this.dom.action.hidden = true;
     this.dom.action.innerHTML = '';
+    // 手机上操作区会占掉底部一整条:撤掉标记,时间线/现场记录才能回到原位
+    this.root.querySelector('.av')?.classList.remove('is-acting');
     if (r) r(result);
   }
 
@@ -917,8 +1009,23 @@ export class AvalonScreen {
       this._humanResolve = resolve;
       this.dom.action.innerHTML = '';
       this.dom.action.hidden = false;
+      // ★ 手机横屏「时间线」和「操作区」都在底部,不加这个标记就会叠在一起
+      const shell = this.root.querySelector('.av');
+      shell?.classList.add('is-acting');
       build(this.dom.action, (result) => this._resolveHuman(result));
+      // 操作区(选人/投票/投卡)高度差别很大,由 JS 量出来写进 CSS 变量
+      // (与扑克的 --actionbar-h 同一个做法),时间线/现场记录用 calc() 让开它。
+      // ⚠️ 同步量一次(强制布局)+ 下一帧补量一次:只靠 rAF 会拿到旧值。
+      this._measureAction();
+      requestAnimationFrame(() => this._measureAction());
     });
+  }
+
+  /** 把操作区的实测高度写进 --av-act-h(手机横屏的面板让位靠它) */
+  _measureAction() {
+    const shell = this.root.querySelector('.av');
+    if (!shell || !this.dom.action || this.dom.action.hidden) return;
+    shell.style.setProperty('--av-act-h', `${Math.ceil(this.dom.action.offsetHeight)}px`);
   }
 
   /**

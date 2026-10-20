@@ -712,6 +712,42 @@ export class WerewolfKernel {
     });
   }
 
+  /**
+   * 「回合推进卡住了」的**确定性修复**。runner 发现「状态没往前走」时调它。
+   *
+   * 为什么需要(与卧底那份同一个理由,但狼人杀的坏法不一样):
+   *   · `night` 且三步都走完了却没天亮:runner 的循环只认 `nightStep() !== 'done'`,
+   *     一旦这个条件在 done 上成立不了(存档死在「夜里最后一步刚记完」那一刻),
+   *     就再也没有人调 dawn() —— **整夜卡在那里**;
+   *   · `day` 却没有当前发言者(order 空 / orderIdx 越界):原代码是 `continue`,
+   *     那是**死转**(主线程被吃满,画面完全不动);
+   *   · `vote` 却没有人待投:票记满了却没结算(同样来自坏存档)。
+   *
+   * 修复原则:**不猜结果**。夜里该天亮就天亮(死讯按已经记下的刀口/毒药算),
+   * 发言轮空了就直接进投票,票满了就结算。这样即便存档是坏的,也能走到一个
+   * 规则允许的终局,而不是永远停在某一夜/某一天。
+   *
+   * @returns {string|null} 修了什么;无事可修返回 null
+   */
+  repairTurn() {
+    const st = this.state;
+    if (st.phase === 'end') return null;
+    if (st.phase === 'night' && this.nightStep() === 'done') {
+      this.dawn();
+      return 'night-done';
+    }
+    if (st.phase === 'day' && this.currentSpeaker() === null) {
+      st.phase = 'vote';
+      this._log('public', 'voteStart', { text: '发言顺序已空(修复),直接开始放逐投票' });
+      return 'day-empty';
+    }
+    if (st.phase === 'vote' && !this.pendingVoters().length) {
+      this._settleVote();
+      return 'vote-idle';
+    }
+    return null;
+  }
+
   /* ------------------------------------------------------------ 账本 */
 
   /**

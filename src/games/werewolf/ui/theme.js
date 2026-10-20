@@ -37,7 +37,16 @@ export const WEREWOLF_CSS = `
 }
 .ww__tag.is-night { color: #8f9ac4; border-color: rgba(143, 154, 196, .45); }
 .ww__tag.is-vote { color: #7a4b9a; border-color: rgba(122, 75, 154, .4); }
+/* 回合边界:「第 N 天结束 →」要**比平时更显眼**,否则观众一眼扫不到就以为没变化。
+   只改颜色不动位置 —— 标签一挪,顶栏在手机上就要重排(那里每 1px 都是挤出来的)。 */
+.ww__tag.is-boundary {
+  color: var(--gold); border-color: rgba(196, 162, 88, .55);
+  background: rgba(196, 162, 88, .12);
+}
 .ww__topBtns { display: flex; gap: 8px; }
+/* 节奏按钮:「⏸ 暂停 / ⏭ 下一回合 / ▶ 继续」—— 图标与文字分两段,
+   手机横屏只留图标(见 theme.js 末尾的移动端块) */
+.ww__paceLabel { white-space: nowrap; }
 
 /* 天黑遮罩:全屏 DOM 层(不在 3D 里做 —— 见 props/werewolf 的文件头) */
 .ww__nightMask {
@@ -184,4 +193,161 @@ export const WEREWOLF_CSS = `
 .ww__banner[hidden] { display: none; }
 .ww__banner b { display: block; font-size: 24px; letter-spacing: .08em; margin-bottom: 6px; }
 .ww__banner span { font-size: 12.5px; color: var(--text-dim); }
+
+/* 玩家模式:左上角是「我的身份」卡,积分榜整块往下让一格。
+   用 class 而不是 inline style —— 桌面要让 146px、手机横屏只要让 96px,
+   inline 样式会把媒体查询整条压死(_render 里只切 .is-join)。 */
+.ww.is-join .ww__score { top: 146px; }
+
+/* ════════════════════════════════════════════════════════════════════
+ * 手机横屏(主目标)
+ *
+ * 断点与 web/mobile.css 完全同一套(那个文件解释了为什么用 height 而不是宽度):
+ *   主目标 「(orientation: landscape) and (max-height: 500px)」
+ *   → 实测三个目标尺寸 956×440 / 852×393 / 800×360 全部命中。
+ *   次目标 「(max-width: 820px)」/「(max-width: 520px)」是竖屏与小屏兜底。
+ *
+ * 策略直接抄扑克那份(mobile.css 顶部注释),只是把「侧栏 + 手牌一览」换成
+ * 这里的「上帝面板 / 时间线 / 现场记录」:
+ *   1. 顶栏三区定宽:右侧按钮钉死不压缩,左侧信息可压缩 + 省略号;
+ *   2. 面板全部退到四角,中间横带留给 3D 牌桌(桌心永远不被盖住);
+ *   3. 可点元素保底 40px;说明性文案(不是操作本身)在手机上省掉。
+ *
+ * 实测约束(最紧的 800×360):
+ *   顶栏 40;上帝面板 top 46 + 40vh(144)→ 底边 190;
+ *   时间线 bottom 8 + 26vh(94)→ 顶边 258;现场记录 bottom 8 + 24vh(86)→ 顶边 266。
+ * 数字全部由 tools/mobilegameshots.mjs 每轮实测断言(越界/重叠/溢出直接红)。
+ * ════════════════════════════════════════════════════════════════════ */
+@media (orientation: landscape) and (max-height: 500px) {
+  .ww__top {
+    height: 40px; min-height: 40px;
+    padding: 0 8px; gap: 6px;
+    align-items: center; flex-wrap: nowrap;
+    overflow: hidden;
+  }
+  .ww__brand { flex: 1 1 auto; min-width: 0; overflow: hidden; gap: 6px; }
+  .ww__title { display: none; }          /* 手机横屏:品牌名收益最低,先让位 */
+  .ww__brand > * {
+    flex: 0 1 auto; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  #wwDayTag, #wwPhaseTag { flex: 0 0 auto; }   /* 天数/阶段是回合推进的主要反馈 */
+  .ww__tag { font-size: 11px; padding: 2px 7px; }
+  .ww__topBtns { flex: 0 0 auto; min-width: max-content; gap: 4px; }
+  .ww__topBtns .btn { min-height: 40px; min-width: 40px; padding: 0 8px; font-size: 12px; white-space: nowrap; }
+  .ww__paceLabel { display: none; }      /* 节奏按钮在手机上只留图标 */
+
+  .ww__god {
+    right: 8px; top: 46px;
+    width: min(44vw, 400px); max-height: 40vh;
+    padding: 7px 9px; border-radius: 12px;
+  }
+  .ww__score {
+    left: 8px; right: auto; top: 46px;
+    width: min(30vw, 240px); max-height: 26vh;
+    padding: 7px 9px; border-radius: 12px;
+  }
+  /* 玩家模式:左上角被「我的身份」卡占了(约 96px 高),积分榜跟着往下让 */
+  .ww.is-join .ww__score { top: calc(46px + 96px + 6px); }
+  .ww__panelHead > span:first-child { font-size: 11.5px; }
+  .ww__panelHint { font-size: 10px; }
+  .ww__table { font-size: 11px; }
+  .ww__table th { padding: 2px 3px; }
+  .ww__table td { padding: 3px; }
+  .ww__say { max-width: 30vw; }
+  .ww__nightActs { font-size: 10.5px; }
+
+  .ww__me { left: 8px; top: 46px; padding: 7px 12px; border-radius: 12px; }
+  .ww__meLabel { font-size: 10px; }
+  .ww__meRole { font-size: 18px; }
+  .ww__meHint { font-size: 11px; max-width: 44vw; }
+
+  .ww__feed {
+    left: 8px; bottom: 8px;
+    width: min(50vw, 460px); max-height: 26vh;
+    padding: 6px 8px; border-radius: 12px;
+  }
+  .ww__feedHead { font-size: 11px; margin-bottom: 2px; }
+  .ww__item { font-size: 11px; line-height: 1.45; padding: 2px 0; }
+
+  .ww__side {
+    right: 8px; bottom: 8px;
+    width: min(32vw, 260px); max-height: 24vh;
+    border-radius: 12px;
+  }
+  .ww__sideHead { font-size: 11px; padding: 4px 8px; }
+  .ww__log { padding: 4px 8px; font-size: 11px; line-height: 1.45; }
+
+  /* 「天黑请闭眼」:手机上挪到左边空地上,别压住右边那块面板 */
+  .ww__nightHead { left: 26%; top: 16%; }
+  .ww__nightHead b { font-size: 20px; letter-spacing: .12em; }
+  .ww__nightHead span { font-size: 11px; }
+
+  .ww__action {
+    left: 50%; bottom: 6px; transform: translateX(-50%);
+    width: min(94vw, 720px);
+    padding: 6px 10px; border-radius: 12px;
+  }
+  .ww__actHead { font-size: 12px; margin-bottom: 4px; }
+  .ww__actNote { display: none; }        /* 说明性文案:省掉一行高度 */
+  .ww__actRow { gap: 6px; }
+  .ww__input { min-height: 40px; font-size: 13px; padding: 6px 8px; }
+  /* ⚠️ min-width 也要给:单个汉字的按钮(「说」)只有 35px 宽,手指点不准 */
+  .ww__action .btn { min-height: 40px; min-width: 44px; padding: 0 10px; font-size: 12.5px; white-space: nowrap; }
+  .ww__voteBtn { min-height: 40px; min-width: 64px; font-size: 12.5px; }
+
+  /* ★ 玩家操作时,底部那一条要留给操作区(时间线/现场记录往上让)。
+     ⚠️ 让多少**不写死**:屏幕那边在操作区出现时量一次高度写进 --ww-act-h
+        (与扑克的 --actionbar-h 同一个做法)。写死数字的后果实测过:
+        操作区 74~131px 高不等,按 118px 让 → 有的回合被压住 19px。 */
+  .ww.is-acting .ww__feed {
+    bottom: calc(var(--ww-act-h, 74px) + 10px);
+    width: min(44vw, 440px); max-height: 18vh;
+  }
+  .ww.is-acting .ww__side { bottom: calc(var(--ww-act-h, 74px) + 10px); max-height: 18vh; }
+
+  .ww__banner { padding: 12px 22px; max-width: 88vw; }
+  .ww__banner b { font-size: 20px; }
+  .ww__banner span { font-size: 12px; }
+  .ww__lobbyCard {
+    width: min(94vw, 620px); max-height: calc(100vh - 12px);
+    overflow: auto; padding: 12px 16px; border-radius: 16px;
+  }
+  .ww__fields { gap: 8px; margin: 8px 0; }
+  .ww__field select { min-height: 40px; }
+  .ww__lobbyBtns .btn { min-height: 40px; }
+}
+
+/* 竖屏 / 小屏兜底:同一套策略,不追求四角摆放(竖屏高度足够)。
+   ⚠️ 必须加 min-height:501px —— 800×360 这类横屏手机**同时**命中 820 那条,
+      而它写在后面(同优先级后写者赢),会把横屏那套算过的 max-height 全顶回去。 */
+@media (max-width: 820px) and (min-height: 501px) {
+  .ww__top { flex-wrap: nowrap; overflow: hidden; }
+  .ww__brand { flex: 1 1 auto; min-width: 0; overflow: hidden; }
+  .ww__brand > * { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ww__topBtns { flex: 0 0 auto; min-width: max-content; }
+  .ww__topBtns .btn { min-height: 40px; }
+  .ww__paceLabel { display: none; }
+  .ww__god { width: min(300px, 54vw); max-height: 40vh; }
+  .ww__score { width: min(260px, 46vw); max-height: 26vh; }
+  .ww.is-join .ww__score { top: 150px; }
+  .ww__feed { width: min(56vw, 420px); max-height: 26vh; }
+  .ww__side { width: min(220px, 36vw); max-height: 22vh; }
+  .ww__action { width: 94vw; }
+  .ww__actNote { display: none; }
+  .ww__input { min-height: 40px; }
+  .ww__action .btn, .ww__voteBtn { min-height: 40px; }
+  .ww.is-acting .ww__feed { bottom: calc(var(--ww-act-h, 74px) + 10px); max-height: 22vh; }
+  .ww.is-acting .ww__side { bottom: calc(var(--ww-act-h, 74px) + 10px); max-height: 20vh; }
+}
+
+/* 极窄屏(普通手机竖屏) */
+@media (max-width: 520px) {
+  .ww__title { display: none; }
+  .ww__tag { font-size: 11px; padding: 2px 6px; }
+  .ww__god, .ww__me { width: 92vw; }
+  .ww__score { width: 92vw; }
+  .ww__feed { width: 92vw; }
+  .ww__side { width: 46vw; }
+}
 `;

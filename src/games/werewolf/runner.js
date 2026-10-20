@@ -16,11 +16,30 @@
  * ⚠️ 两条节奏上的讲究(研究文档「5. 发言长度与节奏」)
  *   · 夜里三个角色**并行**请求(互不依赖),白天发言**串行**(后者要听前者);
  *   · 投票串行、按座位顺序揭晓 —— 保留「谁先投」的戏剧性,也让画面好读。
+ *
+ * ⚠️ 回合推进(一天 = 一夜 + 一个白天 + 一次放逐)的三条硬规矩
+ *   1. 天数只有内核会改(_settleVote 里 day += 1 + _startNight);runner 只观察,
+ *      发现天数变了就广播「第 N 天结束」→ 过闸门 → 广播「第 N+1 天开始」。
+ *   2. 一次结算只推进一天:游标是 `_lastDay`,单调递增,重放/异常都不会跳两天。
+ *   3. 任何一步问不出来都不许把对局停死:发言降级成中性句、投票降级成弃票、
+ *      夜里降级成 none,状态坏到没有下一步就 kernel.repairTurn() 修一次。
+ *      (用户实测的「一回合结束后画面完全不动」就是这条路走死了。)
  */
 
 import { buildView } from './view.js';
 import { fallbackSpeech } from './prompts.js';
 import { CANCEL_MESSAGE } from '../../shared/llmCaller.mjs';
+import { RoundGate } from '../../shared/roundGate.mjs';
+
+/** 这次错误是不是「本局被取消/退出」—— 那种错误要原样往上抛,不能当普通失败吞掉 */
+function isCancel(err, signal) {
+  return !!signal?.aborted || err?.message === CANCEL_MESSAGE || !!err?.canceled;
+}
+
+/** 中文回合名:狼人杀里一轮 = 一天(夜 + 白天) */
+export function roundLabel(n) {
+  return `第 ${n} 天`;
+}
 
 /** 可被 abort 打断的等待(退出本局 / 重开时立刻停,不要睡完再发现已经取消) */
 function sleep(ms, signal) {
@@ -55,11 +74,14 @@ export class WerewolfRunner {
    * @param {(()=>({rounds:number,ranking:Array<{seat:number,name:string,score:number}>}))|null} [opts.matchStandings]
    *   本场积分榜的公开快照(屏幕提供)。传给 buildView → 提示词里的【你的最终目标】。
    *   返回函数而不是数组,是因为**每一局都会变**:开局时取一次会一直念旧排名。
+   * @param {RoundGate} [opts.roundGate] 回合(天)之间的闸门:自动停顿 + 暂停/单步。
+   *   不传就建一个 holdMs:0 的 —— 纯 Node 测试与平衡模拟器的行为与以前完全一致。
    * @param {AbortSignal} [opts.signal]
    */
   constructor({
     kernel, agents = new Map(), human = null, hooks = {},
     delayMs = 0, revealSecrets = false, signal = null, matchStandings = null,
+    roundGate = null,
   } = {}) {
     if (!kernel) throw new Error('WerewolfRunner 需要 kernel');
     this.kernel = kernel;
@@ -70,6 +92,9 @@ export class WerewolfRunner {
     this.revealSecrets = !!revealSecrets;
     this.signal = signal || null;
     this.matchStandings = typeof matchStandings === 'function' ? matchStandings : null;
+    this.roundGate = roundGate instanceof RoundGate
+      ? roundGate
+      : new RoundGate({ holdMs: 0, signal: this.signal });
     this.running = false;
     this._stopped = false;
     this._ended = false;
@@ -103,6 +128,11 @@ export class WerewolfRunner {
    * 「接着跑」是快照恢复的关键:恢复出来的 state 可能停在夜里第二步、发言中间、
    * 或投票中间(有人已经投过了),这里一律从 kernel 的当前状态继续,
    * 不假设「一定从头开始」。所以恢复流程不需要第二套「重建到第几步」的代码。
+   *
+   * ⚠️ for(;;) 里**没有一条 `continue` 是空转**:每个分支要么 await 一次真正的
+   *    调用/停顿,要么先 repairTurn() 把状态推进一步,两者都不成立就抛错。
+   *    (以前 `if (seat === null) continue;` / `if (!pending.length) continue;`
+   *     在坏状态下是死转 —— 主线程被吃满,表现就是「画面完全不动」。)
    */
   async run() {
     if (this.running) return;
@@ -112,14 +142,21 @@ export class WerewolfRunner {
     try {
       if (this.kernel.state.phase === 'idle') {
         this.kernel.start(this.hooks.names || []);
+        this._lastDay = this.kernel.state.day;
         this._emit('start', {
           day: this.kernel.state.day,
           seats: this.kernel.state.config.seats,
           roster: { ...this.kernel.state.roster },
         });
       }
+      // 恢复出来的局面可能停在「夜里最后一步刚记完」/「发言轮空了」/「票满了」
+      this._repair('开局');
+      let steps = 0;
       for (;;) {
         if (this._shouldStop()) return;
+        if (steps++ > this._stepBudget()) {
+          throw new Error('狼人杀的对局没有推进(天数上限与步数上限都过了还没终局)');
+        }
         const st = this.kernel.state;
         if (st.phase === 'end') {
           this._emitEnd();
@@ -131,23 +168,83 @@ export class WerewolfRunner {
         }
         if (st.phase === 'day') {
           const seat = this.kernel.currentSpeaker();
-          if (seat === null) continue;            // 防御:状态自相矛盾时别死循环
+          if (seat === null) {
+            // 发言轮却没有当前发言者 → 让内核直接进投票
+            if (!this._repair('发言轮没有当前发言者')) throw new Error('发言轮没有当前发言者,内核也修不了');
+            continue;
+          }
+          const dayBefore = st.day;
           await this._speak(seat);
-          await this._pause();
+          await this._afterStep(dayBefore);
           continue;
         }
         if (st.phase === 'vote') {
           const pending = this.kernel.pendingVoters();
-          if (!pending.length) continue;          // 结算发生在 recordVote 内部
+          if (!pending.length) {
+            // 票记满了却没有结算 → 让内核补一次结算(它会自己进下一夜 / 终局)
+            if (!this._repair('投票轮票已记满')) throw new Error('投票轮没有待投的人,内核也修不了');
+            continue;
+          }
+          const dayBefore = st.day;
           await this._vote(pending[0]);
-          await this._pause();
+          await this._afterStep(dayBefore);
           continue;
         }
-        throw new Error(`runner 停在了意外阶段:${st.phase}`);
+        // 走到这里说明存档/外部代码把状态写坏了 → 先修,修不了才抛
+        if (!this._repair(`意外阶段 ${st.phase}`)) {
+          throw new Error(`runner 停在了意外阶段:${st.phase}`);
+        }
       }
     } finally {
       this.running = false;
     }
+  }
+
+  /**
+   * 一步走完之后:天数变了就先报边界、等闸门、再报新一天开始,最后才是常规停顿。
+   * 顺序:`exile`(谁出局)→ `roundEnd`(第 N 天结束)→ 闸门 → `round` + `roundStart`。
+   */
+  async _afterStep(prevDay) {
+    const st = this.kernel.state;
+    if (st.phase !== 'end' && st.day !== prevDay) await this._roundBoundary(prevDay);
+    await this._pause();
+  }
+
+  /** 回合(天)边界:广播「结束」→ 闸门 → 广播「开始」 */
+  async _roundBoundary(prevDay) {
+    const st = this.kernel.state;
+    if (st.day === prevDay) return;
+    const exiled = st.events.filter((e) => e.kind === 'exile' && e.day === prevDay).map((e) => e.seat);
+    this._emit('roundEnd', {
+      round: prevDay,
+      next: st.day,
+      label: roundLabel(prevDay),
+      nextLabel: roundLabel(st.day),
+      eliminated: exiled,
+      alive: st.alive.filter(Boolean).length,
+      tie: exiled.length === 0,
+    });
+    this._lastDay = st.day;
+    await this.roundGate.waitBoundary({ round: st.day, label: roundLabel(st.day) });
+    if (this._shouldStop()) throw new Error(CANCEL_MESSAGE);
+    this._emit('round', { round: st.day, label: roundLabel(st.day), day: st.day });
+    this._emit('roundStart', { round: st.day, label: roundLabel(st.day), phase: st.phase });
+  }
+
+  /** 步数预算:正常一局是 天数 × (夜 3 步 + 发言 N + 投票 N),给足余量后必须停下 */
+  _stepBudget() {
+    const st = this.kernel.state;
+    const seats = st.config?.seats || st.alive.length || 6;
+    const days = st.config?.maxDays || 6;
+    return Math.max(200, seats * (days + 1) * 6);
+  }
+
+  /** 状态自相矛盾时做一次确定性修复;修不了返回 false(由调用方抛错) */
+  _repair(why) {
+    const fixed = this.kernel.repairTurn?.();
+    if (!fixed) return false;
+    this._emit('repair', { why, fix: fixed, day: this.kernel.state.day, phase: this.kernel.state.phase });
+    return true;
   }
 
   async _pause() {
@@ -270,6 +367,12 @@ export class WerewolfRunner {
         if (!agent) throw new Error(`${seat + 1} 号既不是玩家也没有 AI —— 这一局开不起来`);
         res = await agent.speak(view, { signal: this.signal });
       }
+    } catch (err) {
+      // ★ 一次发言问不出来(超时/网络/解析)不能把整局停死,否则上一轮打完
+      //   之后画面就再也不动了 —— 降级成确定性中性句,事件里留一条 stepError。
+      if (isCancel(err, this.signal) || this._shouldStop()) throw err;
+      this._emit('stepError', { seat, step: 'speak', message: String(err?.message || err) });
+      res = { say: fallbackSpeech(seat, this.kernel.state.day), quality: 'low' };
     } finally {
       this.hooks.onThinking?.(null, '', false);
     }
@@ -305,6 +408,12 @@ export class WerewolfRunner {
         if (!agent) throw new Error(`${seat + 1} 号既不是玩家也没有 AI —— 这一局开不起来`);
         res = await agent.vote(view, { signal: this.signal });
       }
+    } catch (err) {
+      // 与发言同一条规矩:这一票问不出来就**弃票**(规则内合法的动作),
+      // 不随机改投,也不让整局停在这一票上。
+      if (isCancel(err, this.signal) || this._shouldStop()) throw err;
+      this._emit('stepError', { seat, step: 'vote', message: String(err?.message || err) });
+      res = { target: null, reason: '' };
     } finally {
       this.hooks.onThinking?.(null, '', false);
     }
